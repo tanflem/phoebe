@@ -6,7 +6,8 @@
 
 import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
-import { isMovingBranch, LOCAL_ENGINE_DIR, resolveEngineEntry } from "./boot.ts";
+import { isMovingBranch, LOCAL_ENGINE_DIR, observerEngineEnv, resolveEngineEntry } from "./boot.ts";
+import type { LaunchedEngine } from "./reconcile.ts";
 
 describe("resolveEngineEntry", () => {
   test("a local source execs the engine CLI under the mounted dir", () => {
@@ -41,6 +42,55 @@ describe("resolveEngineEntry", () => {
         { localEngineDir: "/opt/phoebe-engine", exists: (path) => path !== entry },
       ),
     ).toThrow(/no engine is mounted at \/opt\/phoebe-engine/);
+  });
+});
+
+describe("observerEngineEnv", () => {
+  const launched = (overrides: Partial<LaunchedEngine>): LaunchedEngine => ({
+    entry: "/engine/src/cli.ts",
+    source: { source: "github", repo: "JesusFilm/phoebe", ref: "main" },
+    sha: "a".repeat(40),
+    config: "1:2",
+    quarantinedSha: null,
+    guarded: true,
+    sample: () => ({ config: "1:2", remoteSha: "a".repeat(40) }),
+    ...overrides,
+  });
+
+  test("describes the configured source and exact running commit", () => {
+    expect(observerEngineEnv(launched({}))).toEqual({
+      PHOEBE_RUNNING_ENGINE_SOURCE: "github",
+      PHOEBE_RUNNING_ENGINE_REPO: "JesusFilm/phoebe",
+      PHOEBE_RUNNING_ENGINE_REF: "main",
+      PHOEBE_RUNNING_ENGINE_SHA: "a".repeat(40),
+    });
+  });
+
+  test("makes a crash-loop fallback explicit", () => {
+    expect(
+      observerEngineEnv(
+        launched({
+          sha: "a".repeat(40),
+          quarantinedSha: "b".repeat(40),
+        }),
+      ),
+    ).toMatchObject({
+      PHOEBE_RUNNING_ENGINE_SHA: "a".repeat(40),
+      PHOEBE_QUARANTINED_ENGINE_SHA: "b".repeat(40),
+    });
+  });
+
+  test("local engines do not invent repo/ref/SHA provenance", () => {
+    expect(
+      observerEngineEnv(
+        launched({
+          source: { source: "local" },
+          sha: null,
+          quarantinedSha: null,
+          guarded: false,
+        }),
+      ),
+    ).toEqual({ PHOEBE_RUNNING_ENGINE_SOURCE: "local" });
   });
 });
 

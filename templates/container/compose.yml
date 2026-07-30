@@ -28,6 +28,12 @@ services:
         PHOEBE_INSTALL_COMMAND: "{{INSTALL_COMMAND}}"
     image: phoebe-runtime:latest
     restart: unless-stopped
+    labels:
+      # Stable, opt-in discovery contract for read-only observer tools. Repo
+      # identity and effective config come from `phoebe status --json`, not
+      # duplicated Compose values that could drift from phoebe.config.ts.
+      org.jesusfilm.phoebe.role: agent
+      org.jesusfilm.phoebe.observer-version: "1"
     environment:
       # Secrets — populate via `.env` (see `.env.example`). GH_TOKEN also
       # authenticates the engine checkout when `engine.source` is "github".

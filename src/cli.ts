@@ -21,6 +21,7 @@ import { pathToFileURL } from "node:url";
 import { resolveConfig } from "./config-schema.ts";
 import { formatInitReport, runInit } from "./init.ts";
 import { applyEnvOverlay, loadUserConfig, resolveConfigPath } from "./load-config.ts";
+import { observerStatusPath, readObserverStatus } from "./observer-status.ts";
 import { setResolvedConfig } from "./resolved-config.ts";
 
 type ParsedArgs = { configPath: string | undefined; help: boolean; forward: string[] };
@@ -62,6 +63,7 @@ export function parseCliArgs(argv: readonly string[]): ParsedArgs {
 }
 
 export type ParsedInitArgs = { targetDir: string; help: boolean };
+export type ParsedStatusArgs = { configPath: string | undefined; help: boolean };
 
 /**
  * Parse argv left after the leading `init` token has been consumed. Supports
@@ -90,10 +92,22 @@ export function parseInitArgs(argv: readonly string[]): ParsedInitArgs {
   return { targetDir: targetDir ?? ".", help };
 }
 
+export function parseStatusArgs(argv: readonly string[]): ParsedStatusArgs {
+  const parsed = parseCliArgs(argv);
+  const unknown = parsed.forward.filter((arg) => arg !== "--json");
+  if (unknown.length > 0) {
+    throw new Error(
+      `Unknown status argument(s): ${unknown.join(", ")}. See \`phoebe status --help\`.`,
+    );
+  }
+  return { configPath: parsed.configPath, help: parsed.help };
+}
+
 const HELP_TEXT = `phoebe — AFK coding agent
 
 Usage:
   phoebe init [dir]                Scaffold a consumer-owned runtime
+  phoebe status --json             Read the observer status snapshot
   phoebe [--config <path>] [flags] Run the engine
 
 Options (engine mode):
@@ -133,6 +147,16 @@ Existing files are left untouched, so re-running is safe. To regenerate a
 scaffolded file, delete it first and re-run \`phoebe init\`.
 `;
 
+const STATUS_HELP_TEXT = `phoebe status — read the observer status snapshot
+
+Usage:
+  phoebe status --json [--config <path>]
+
+Reads the engine's atomically-written, versioned status from paths.stateDir.
+The command is read-only and always emits a JSON envelope, including when no
+engine snapshot exists yet.
+`;
+
 /**
  * Engine-CLI entry point. Loads the consumer's config, overlays env, installs
  * the resolved config, then runs the engine (or scaffolds via `init`). The
@@ -152,6 +176,21 @@ export async function runCli(): Promise<void> {
     }
     const report = runInit({ targetDir: parsed.targetDir });
     process.stdout.write(formatInitReport(report, parsed.targetDir));
+    return;
+  }
+
+  if (args[0] === "status") {
+    const parsed = parseStatusArgs(args.slice(1));
+    if (parsed.help) {
+      process.stdout.write(STATUS_HELP_TEXT);
+      return;
+    }
+    const configPath = resolveConfigPath(parsed.configPath, process.cwd());
+    const userConfig = await loadUserConfig(configPath);
+    const overlaid = applyEnvOverlay(userConfig, process.env);
+    const resolved = resolveConfig(overlaid);
+    const result = readObserverStatus(observerStatusPath(resolved.paths.stateDir));
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
 

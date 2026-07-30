@@ -23,6 +23,9 @@ services:
       args:
         PHOEBE_INSTALL_COMMAND: "pnpm install --frozen-lockfile"
     image: phoebe-runtime:dogfood
+    labels:
+      org.jesusfilm.phoebe.role: agent
+      org.jesusfilm.phoebe.observer-version: "1"
     # Keep tini as PID 1 (reaps zombies, forwards signals), but run the
     # bootstrapper from the mount instead of a globally installed `phoebe`.
     # bootstrap/cli.ts is TypeScript and lives outside node_modules here, so

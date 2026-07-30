@@ -121,6 +121,21 @@ Flags go after the compose service name (`docker compose run --rm phoebe
 --run-once`); `phoebe boot` forwards them to the engine it launches. No flags is
 the deployed shape — `docker compose up -d` runs the persistent loop.
 
+## Read-only observer status
+
+The scaffolded container can report its current summarized state without
+starting work or contacting GitHub:
+
+```bash
+docker exec <phoebe-container> phoebe status --json
+```
+
+The output is versioned JSON intended for local dashboards and monitoring. It
+contains the current work identity, idle/skip reason, bounded recent outcomes,
+engine provenance, and non-secret effective configuration. It never contains
+agent transcripts. See [`status.md`](status.md) for the complete contract and
+the Docker labels used for automatic discovery.
+
 `--dry-run` is the safe way to preview selection on your host without booting
 the container. See [`upgrading.md`](upgrading.md) for start/stop/upgrade
 commands and [`work-kinds.md`](work-kinds.md) for the full selection rules.

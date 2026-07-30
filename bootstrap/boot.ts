@@ -140,7 +140,15 @@ async function launchTarget(configPath: string, guard: CrashGuard): Promise<Laun
   if (source.source === "local") {
     const entry = resolveEngineEntry(source);
     console.log(`[phoebe] boot: engine source "local" — exec ${entry} (long-running).`);
-    return { entry, sha: null, config: fingerprint, guarded: false, quarantinedSha: null, sample };
+    return {
+      entry,
+      source,
+      sha: null,
+      config: fingerprint,
+      guarded: false,
+      quarantinedSha: null,
+      sample,
+    };
   }
 
   const guarded = isMovingBranch(source, token);
@@ -162,7 +170,7 @@ async function launchTarget(configPath: string, guard: CrashGuard): Promise<Laun
     `[phoebe] boot: engine source "github" ${provenance} — exec ${entry} (long-running).`,
   );
 
-  return { entry, sha, config: fingerprint, guarded, quarantinedSha, sample };
+  return { entry, source, sha, config: fingerprint, guarded, quarantinedSha, sample };
 }
 
 /**
@@ -212,12 +220,32 @@ function watchedRefSha(source: ResolvedEngineSource, token: string | undefined):
  * `onSpawnError` override, spawn-engine.mjs's default would `process.exit(1)`
  * here, bypassing boot's drain-latch teardown and leaving `exited` pending.
  */
-function spawnSupervised(entry: string, argv: readonly string[]): SupervisedChild {
+export function observerEngineEnv(engine: LaunchedEngine): Record<string, string> {
+  const sourceEnv: Record<string, string> =
+    engine.source.source === "github"
+      ? {
+          PHOEBE_RUNNING_ENGINE_SOURCE: "github",
+          PHOEBE_RUNNING_ENGINE_REPO: engine.source.repo,
+          PHOEBE_RUNNING_ENGINE_REF: engine.source.ref,
+        }
+      : { PHOEBE_RUNNING_ENGINE_SOURCE: "local" };
+  return {
+    ...sourceEnv,
+    ...(engine.sha ? { PHOEBE_RUNNING_ENGINE_SHA: engine.sha } : {}),
+    ...(engine.quarantinedSha ? { PHOEBE_QUARANTINED_ENGINE_SHA: engine.quarantinedSha } : {}),
+  };
+}
+
+function spawnSupervised(engine: LaunchedEngine, argv: readonly string[]): SupervisedChild {
   let settle!: (exit: EngineExit) => void;
   const exited = new Promise<EngineExit>((resolve) => {
     settle = resolve;
   });
-  const child = spawnEngine(entry, argv, {
+  const child = spawnEngine(engine.entry, argv, {
+    env: {
+      ...process.env,
+      ...observerEngineEnv(engine),
+    },
     onExit: (code: number | null, signal: NodeJS.Signals | null) => settle({ code, signal }),
     onSpawnError: (error: Error) => {
       console.error(`[phoebe] boot: engine failed to spawn — ${error.message}`);
@@ -336,7 +364,7 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
   try {
     exit = await superviseEngine({
       launch: () => launchTarget(configPath, guard),
-      spawn: (entry) => spawnSupervised(entry, argv),
+      spawn: (engine) => spawnSupervised(engine, argv),
       stop,
       intervalMs,
       onRunEnd: (run) => {

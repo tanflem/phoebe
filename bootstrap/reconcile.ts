@@ -30,6 +30,7 @@
 // without processes or timers.
 
 import { statSync } from "node:fs";
+import type { ResolvedEngineSource } from "./engine-source.ts";
 
 /** How often the watch samples the config and the tracked ref. */
 export const DEFAULT_RECONCILE_INTERVAL_MS = 60_000;
@@ -61,6 +62,8 @@ export type WatchState = {
 export type LaunchedEngine = {
   /** The engine CLI path that was spawned. */
   entry: string;
+  /** The configured source this engine was materialized from. */
+  source: ResolvedEngineSource;
   /** The commit it is running; null for a local mount (nothing to compare). */
   sha: string | null;
   /** The config fingerprint at launch. */
@@ -117,7 +120,7 @@ export type SuperviseDeps = {
   /** Re-read the config, resolve + materialize the engine source. */
   launch: () => Promise<LaunchedEngine> | LaunchedEngine;
   /** Spawn the engine as a long-running child. */
-  spawn: (entry: string) => SupervisedChild;
+  spawn: (engine: LaunchedEngine) => SupervisedChild;
   stop: StopLatch;
   intervalMs?: number;
   /** Reads the clock for run durations; injectable so the loop is tested without waiting. */
@@ -283,7 +286,7 @@ export async function superviseEngine(deps: SuperviseDeps): Promise<EngineExit> 
     everLaunched = true;
 
     const startedAt = now();
-    const child = deps.spawn(engine.entry);
+    const child = deps.spawn(engine);
     const outcome = await watchEngine(engine, child, deps, { intervalMs, startedAt, now });
 
     if (outcome.kind === "exit") {

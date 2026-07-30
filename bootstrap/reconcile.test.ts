@@ -249,6 +249,7 @@ function harness(
       if (options.launch) return await options.launch(n);
       return {
         entry: `/engine/${n}/src/cli.ts`,
+        source: { source: "github", repo: "JesusFilm/phoebe", ref: "main" },
         sha: state.sha,
         config: state.config,
         quarantinedSha: null,
@@ -256,8 +257,8 @@ function harness(
         sample: () => ({ config: state.config, remoteSha: state.remoteSha }),
       };
     },
-    spawn: (entry) => {
-      entries.push(entry);
+    spawn: (engine) => {
+      entries.push(engine.entry);
       const next = fakeChild();
       children.push(next);
       return next.child;
@@ -410,6 +411,7 @@ describe("superviseEngine", () => {
         if (attempt === 1) throw new Error("network is down");
         return {
           entry: `/engine/${attempt}/src/cli.ts`,
+          source: { source: "github", repo: "JesusFilm/phoebe", ref: "main" },
           sha: SHA_A,
           config: attempt === 0 ? "1:2" : "9:9",
           quarantinedSha: null,

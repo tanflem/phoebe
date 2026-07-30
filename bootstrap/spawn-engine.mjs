@@ -41,8 +41,11 @@ export function propagateExit(code, signal) {
  * relaunch must not take the container with it (bootstrap/reconcile.ts). Callers
  * that pass `onExit` own the propagation — propagateExit is exported for them.
  */
-export function spawnEngine(entry, args, { onSpawnError, onExit } = {}) {
-  const child = spawn(process.execPath, [entry, ...args], { stdio: "inherit" });
+export function spawnEngine(entry, args, { env, onSpawnError, onExit } = {}) {
+  const child = spawn(process.execPath, [entry, ...args], {
+    stdio: "inherit",
+    ...(env ? { env } : {}),
+  });
 
   const forwarders = new Map();
   for (const signal of ["SIGINT", "SIGTERM"]) {

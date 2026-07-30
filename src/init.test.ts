@@ -137,6 +137,14 @@ describe("runInit", () => {
     );
   });
 
+  test("the scaffolded service opts into observer discovery with a versioned label", () => {
+    const target = makeTempDir();
+    runInit({ targetDir: target });
+    const compose = readFileSync(join(target, "container/compose.yml"), "utf8");
+    expect(compose).toContain("org.jesusfilm.phoebe.role: agent");
+    expect(compose).toContain('org.jesusfilm.phoebe.observer-version: "1"');
+  });
+
   test("the scaffolded image runs the workload unprivileged, with writable volumes", () => {
     // The template's own hardening invariants are asserted in
     // container-image.test.ts; this covers the seam that matters to a consumer

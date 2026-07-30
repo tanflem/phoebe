@@ -55,6 +55,11 @@ import {
   renderPrompt,
 } from "./prompt.ts";
 import {
+  createObserverStatusReporter,
+  observerStatusPath,
+  type ObserverWork,
+} from "./observer-status.ts";
+import {
   buildInitialPrBody,
   buildReviewsHandledComment,
   checksFixFailureComment,
@@ -1389,22 +1394,20 @@ async function fetchCycleWorkData(kinds: readonly WorkKindName[]): Promise<Cycle
   };
 }
 
-function logIdleCycle(data: CycleWorkData): void {
+function logIdleCycle(data: CycleWorkData): string {
   const phoebeBase = process.env["PHOEBE_BASE"];
   if (data.issues.length > 0 && !selectIssue(data.issues, data.blockerStates, phoebeBase)) {
-    console.log(
-      `[phoebe] ${data.issues.length} ${config.readyLabel} issue(s) but none workable this cycle (blocked or waiting on blocker PR).`,
-    );
-    return;
+    const reason = `${data.issues.length} ${config.readyLabel} issue(s) but none workable this cycle (blocked or waiting on blocker PR).`;
+    console.log(`[phoebe] ${reason}`);
+    return reason;
   }
   if (
     data.researchIssues.length > 0 &&
     !selectIssue(data.researchIssues, data.blockerStates, phoebeBase)
   ) {
-    console.log(
-      `[phoebe] ${data.researchIssues.length} ${config.researchLabel} ticket(s) but none workable this cycle (blocked or waiting on blocker PR).`,
-    );
-    return;
+    const reason = `${data.researchIssues.length} ${config.researchLabel} ticket(s) but none workable this cycle (blocked or waiting on blocker PR).`;
+    console.log(`[phoebe] ${reason}`);
+    return reason;
   }
   const stack: StackContext = { issueBodies: data.issueBodies, blockerStates: data.blockerStates };
   if (data.conflictingPrs.length > 0) {
@@ -1427,10 +1430,9 @@ function logIdleCycle(data: CycleWorkData): void {
       );
     }
     if (!unit) {
-      console.log(
-        `[phoebe] ${data.conflictingPrs.length} conflicting PR(s) but none fixable this cycle.`,
-      );
-      return;
+      const reason = `${data.conflictingPrs.length} conflicting PR(s) but none fixable this cycle.`;
+      console.log(`[phoebe] ${reason}`);
+      return reason;
     }
   }
   if (data.failingCheckPrs.length > 0) {
@@ -1441,10 +1443,9 @@ function logIdleCycle(data: CycleWorkData): void {
       );
     }
     if (!unit) {
-      console.log(
-        `[phoebe] ${data.failingCheckPrs.length} failing-CI PR(s) but none fixable this cycle.`,
-      );
-      return;
+      const reason = `${data.failingCheckPrs.length} failing-CI PR(s) but none fixable this cycle.`;
+      console.log(`[phoebe] ${reason}`);
+      return reason;
     }
   }
   if (data.reviewActivityPrs.length > 0 && data.phoebeLogin) {
@@ -1459,13 +1460,14 @@ function logIdleCycle(data: CycleWorkData): void {
       );
     }
     if (!unit) {
-      console.log(
-        `[phoebe] ${data.reviewActivityPrs.length} review-feedback PR(s) but none fixable this cycle.`,
-      );
-      return;
+      const reason = `${data.reviewActivityPrs.length} review-feedback PR(s) but none fixable this cycle.`;
+      console.log(`[phoebe] ${reason}`);
+      return reason;
     }
   }
-  console.log("[phoebe] No work this cycle — idle.");
+  const reason = "No work this cycle — idle.";
+  console.log(`[phoebe] ${reason}`);
+  return reason;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1493,6 +1495,25 @@ function describeUnit(picked: WorkUnit): string {
   return `issue #${unit.issue.number} — base ${unit.resolution.worktreeBase}`;
 }
 
+function observerWork(picked: WorkUnit): ObserverWork {
+  const description = describeUnit(picked);
+  if (picked.kind === "conflicts" || picked.kind === "checks" || picked.kind === "reviews") {
+    return {
+      kind: picked.kind,
+      description,
+      prNumber: picked.unit.prNumber,
+      branch: picked.unit.headRefName,
+      ...(picked.unit.issueNumber !== undefined ? { issueNumber: picked.unit.issueNumber } : {}),
+    };
+  }
+  return {
+    kind: picked.kind,
+    description,
+    issueNumber: picked.unit.issue.number,
+    branch: issueBranch(picked.unit.issue.number),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
@@ -1511,6 +1532,32 @@ export async function runEngine(argv: readonly string[] = process.argv.slice(2))
     Number.isFinite(rawPollIntervalMs) && rawPollIntervalMs > 0
       ? rawPollIntervalMs
       : DEFAULT_POLL_INTERVAL_MS;
+  const selectedProvider = selectProvider();
+  const observer = createObserverStatusReporter({
+    ...(inContainer ? { path: observerStatusPath(config.paths.stateDir) } : {}),
+    repoSlug: config.repoSlug,
+    configuration: {
+      defaultBranch: config.defaultBranch,
+      branchPrefix: config.branchPrefix,
+      readyLabel: config.readyLabel,
+      researchLabel: config.researchLabel,
+      prScope: config.prScope,
+      draftPrs: config.draftPrs,
+      prOptOutLabel: config.prOptOutLabel,
+      workOrder: [...workOrder],
+      provider: selectedProvider.provider.name,
+      model: selectedProvider.model,
+      pollIntervalMs,
+    },
+    secrets: [
+      process.env["GH_TOKEN"] ?? "",
+      ...Object.values(config.providerEnv).map((name) => process.env[name] ?? ""),
+    ],
+    onWriteError: (error) =>
+      console.warn(
+        `[phoebe] Could not write observer status — ${error instanceof Error ? error.message : String(error)}.`,
+      ),
+  });
 
   console.log(
     runOnce
@@ -1534,9 +1581,17 @@ export async function runEngine(argv: readonly string[] = process.argv.slice(2))
   // unit in flight, start no new one, then return (exit 0). The wait below wakes
   // early on drain so an idle poll-sleep does not stall shutdown.
   const drain = installDrainSignal();
+  let failed = false;
   try {
-    await runLoop({ runOnce, dryRun, pollIntervalMs, drain });
+    await runLoop({ runOnce, dryRun, pollIntervalMs, drain, observer });
+  } catch (error) {
+    failed = true;
+    observer.record({ kind: "engine-failed", error });
+    throw error;
   } finally {
+    if (!failed) {
+      observer.record({ kind: "stopped" });
+    }
     drain.dispose();
   }
 }
@@ -1546,17 +1601,24 @@ async function runLoop({
   dryRun,
   pollIntervalMs,
   drain,
+  observer,
 }: {
   runOnce: boolean;
   dryRun: boolean;
   pollIntervalMs: number;
   drain: DrainSignal;
+  observer: ReturnType<typeof createObserverStatusReporter>;
 }): Promise<void> {
   while (true) {
     if (drain.requested) {
       console.log("[phoebe] Drain requested — starting no new work unit; exiting 0.");
+      observer.record({
+        kind: "draining",
+        reason: "Drain requested — starting no new work unit.",
+      });
       break;
     }
+    observer.record({ kind: "selecting" });
     const fetchKinds = runOnce ? oneShotWorkKinds(workOrder) : workOrder;
     const data = await fetchCycleWorkData(fetchKinds);
     const picked = selectFirstWorkUnit(
@@ -1579,8 +1641,9 @@ async function runLoop({
     if (!picked) {
       if (runOnce) {
         console.log(RUN_ONCE_NOTHING_MESSAGE);
+        observer.record({ kind: "idle", reason: RUN_ONCE_NOTHING_MESSAGE });
       } else {
-        logIdleCycle(data);
+        observer.record({ kind: "idle", reason: logIdleCycle(data) });
       }
       if (runOnce || dryRun) break;
       // Interruptible idle poll — a SIGTERM mid-sleep wakes it, the next
@@ -1594,25 +1657,34 @@ async function runLoop({
     // already finished before we looped back here, so exit now.
     if (drain.requested) {
       console.log("[phoebe] Drain requested before starting the next unit — exiting 0.");
+      observer.record({
+        kind: "draining",
+        reason: "Drain requested before starting the next unit.",
+      });
       break;
     }
 
     const decision = executionDecision({ dryRun, inContainer });
     if (decision === "dry-run") {
       console.log(`[phoebe] Would execute: ${describeUnit(picked)}.`);
+      observer.record({ kind: "idle", reason: `Would execute: ${describeUnit(picked)}.` });
       break;
     }
     if (decision === "refuse") {
       console.error(EXECUTION_REFUSED_MESSAGE);
+      observer.record({ kind: "engine-failed", error: EXECUTION_REFUSED_MESSAGE });
       process.exit(1);
     }
 
+    observer.record({ kind: "work-started", work: observerWork(picked) });
     try {
       await KINDS[picked.kind].runUnit(picked.unit, {
         stack: { issueBodies: data.issueBodies, blockerStates: data.blockerStates },
         phoebeLogin: data.phoebeLogin ?? "",
       });
+      observer.record({ kind: "work-completed" });
     } catch (error) {
+      observer.record({ kind: "work-failed", error });
       if (runOnce) {
         throw error;
       }
@@ -1630,6 +1702,10 @@ async function runLoop({
     // than picking up another. This is the graceful-drain boundary.
     if (drain.requested) {
       console.log("[phoebe] Finished the in-flight unit under drain — exiting 0.");
+      observer.record({
+        kind: "draining",
+        reason: "Finished the in-flight unit under drain.",
+      });
       break;
     }
   }
