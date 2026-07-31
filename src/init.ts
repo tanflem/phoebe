@@ -15,14 +15,34 @@ import { CONFIG_DEFAULTS } from "./config-schema.ts";
 
 /** Placeholder tokens rendered into every scaffolded file. */
 export type TemplateParams = {
+  /** GitHub `owner/repo` slug written into the config. */
+  repoSlug: string;
+  /** HTTPS clone URL written into the config. */
+  repoUrl: string;
   /** The consumer's install command (also written into the config). */
   installCommand: string;
+  /** The consumer's check/format/lint gate command. */
+  checkCommand: string;
+  /** The consumer's test command. */
+  testCommand: string;
+  /** Which agent CLI runs by default (`cursor` | `claude` | `codex`). */
+  defaultProvider: string;
   /** The npm package name of the CLI — normally `phoebe-agent`. */
   cliBin: string;
 };
 
+// The four repo/toolchain values default to the same generic placeholders the
+// template hardcoded before they were tokenized, and `defaultProvider` to the
+// engine's own default — so `phoebe init` renders a config identical in effect
+// to today's. `phoebe setup` supplies real answers instead. One template, two
+// callers.
 export const DEFAULT_TEMPLATE_PARAMS: TemplateParams = {
+  repoSlug: "your-org/your-repo",
+  repoUrl: "https://github.com/your-org/your-repo.git",
   installCommand: "npm ci",
+  checkCommand: "npm run check",
+  testCommand: "npm test",
+  defaultProvider: CONFIG_DEFAULTS.defaultProvider,
   cliBin: "phoebe-agent",
 };
 
@@ -175,7 +195,7 @@ function resolvePackageResource(relativePath: string, moduleDir: string): string
 export type RunInitOptions = {
   /** Directory the scaffolded files land under. Created if missing. */
   targetDir: string;
-  /** Override template params (`installCommand`, `cliBin`). */
+  /** Override any template params (repo/toolchain values, provider, `cliBin`). */
   params?: Partial<TemplateParams>;
   /** Root for shipped `templates/` and `prompts/` (test seam). Defaults to
    *  the walk-up from this module. */
@@ -191,6 +211,17 @@ function readShippedFile(
     ? resolvePath(packageRoot, relPath)
     : resolvePackageResource(relPath, moduleDir);
   return readFileSync(absolute, "utf8");
+}
+
+/**
+ * Read a shipped `templates/<relPath>` file verbatim (no substitution). Shares
+ * the package-resource walk-up with `runInit` so `phoebe setup` renders the
+ * exact same config template `init` writes — one template, two callers. Pass
+ * `packageRoot` in tests to point at a fixture tree.
+ */
+export function readTemplate(templateRelPath: string, packageRoot?: string): string {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  return readShippedFile(join("templates", templateRelPath), packageRoot, moduleDir);
 }
 
 /**

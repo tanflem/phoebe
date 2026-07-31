@@ -26,7 +26,21 @@ scaffolds for you.
 
 ## Quickstart
 
-From the root of the repo you want Phoebe to work:
+From the root of the repo you want Phoebe to work, the interactive wizard
+scaffolds everything and fills in `phoebe.config.ts` and `.env` for you:
+
+```bash
+npx --yes phoebe-agent setup      # scaffold + interactive Q&A → ready-to-run config & .env
+```
+
+`setup` detects your git remote for the repo fields, asks for your install/check/
+test commands, lets you pick the agent provider (`claude`/`cursor`/`codex`), and
+prompts for your `GH_TOKEN` and provider key (input masked). It never overwrites
+files you've edited, so it's safe to re-run to reconfigure. When it finishes you
+can go straight to `docker compose build` — no hand-editing.
+
+Prefer to fill things in yourself? `phoebe init` writes the same scaffold with
+generic placeholders and no prompts:
 
 ```bash
 npx --yes phoebe-agent init      # scaffold config, prompts, .env.example, container/
@@ -34,8 +48,8 @@ npx --yes phoebe-agent init      # scaffold config, prompts, .env.example, conta
 
 Then edit the five required fields in `phoebe.config.ts`, pin the engine with
 `engine: { source: "github", ref: "v0.1.0" }`, and copy `.env.example` to `.env`
-and fill in your `GH_TOKEN` and provider key. The scaffolded `.env` lives at the
-repo root while the compose files live in `container/`, so pass
+and fill in your `GH_TOKEN` and provider key. Either way, the scaffolded `.env`
+lives at the repo root while the compose files live in `container/`, so pass
 `--env-file ../.env` when you run Compose from there:
 
 ```bash

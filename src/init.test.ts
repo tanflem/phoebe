@@ -53,10 +53,26 @@ describe("planInitOutputs", () => {
 describe("renderTemplate", () => {
   test("substitutes {{INSTALL_COMMAND}} and {{CLI_BIN}}", () => {
     const out = renderTemplate("run {{INSTALL_COMMAND}} then {{CLI_BIN}}", {
+      ...DEFAULT_TEMPLATE_PARAMS,
       installCommand: "pnpm i",
       cliBin: "phoebe-agent",
     });
     expect(out).toBe("run pnpm i then phoebe-agent");
+  });
+
+  test("substitutes the repo/toolchain and provider tokens", () => {
+    const out = renderTemplate(
+      "{{REPO_SLUG}} {{REPO_URL}} {{CHECK_COMMAND}} {{TEST_COMMAND}} {{DEFAULT_PROVIDER}}",
+      {
+        ...DEFAULT_TEMPLATE_PARAMS,
+        repoSlug: "acme/widget",
+        repoUrl: "https://github.com/acme/widget.git",
+        checkCommand: "make check",
+        testCommand: "make test",
+        defaultProvider: "claude",
+      },
+    );
+    expect(out).toBe("acme/widget https://github.com/acme/widget.git make check make test claude");
   });
 
   test("throws on an unknown {{TOKEN}}", () => {
@@ -176,6 +192,20 @@ describe("runInit", () => {
     const config = readFileSync(join(target, "phoebe.config.ts"), "utf8");
     expect(config).toContain(`installCommand: "pnpm i"`);
     expect(config).toContain(`from "phoebe-agent"`);
+  });
+
+  test("scaffolds a config with the generic placeholders and no leftover tokens", () => {
+    const target = makeTempDir();
+    runInit({ targetDir: target });
+    const config = readFileSync(join(target, "phoebe.config.ts"), "utf8");
+    expect(config).not.toMatch(/\{\{[A-Z_]+\}\}/);
+    expect(config).toContain(`repoSlug: "your-org/your-repo"`);
+    expect(config).toContain(`repoUrl: "https://github.com/your-org/your-repo.git"`);
+    expect(config).toContain(`checkCommand: "npm run check"`);
+    expect(config).toContain(`testCommand: "npm test"`);
+    // Default provider matches the engine default, so init's resolved config is
+    // unchanged from before these fields were tokenized.
+    expect(config).toContain(`defaultProvider: "${CONFIG_DEFAULTS.defaultProvider}"`);
   });
 
   test("does not overwrite existing files on re-run", () => {

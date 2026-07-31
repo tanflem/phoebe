@@ -19,12 +19,17 @@ const promptsDir = join(import.meta.dirname, "..", "prompts");
 // Files that legitimately define, resolve, load, or fixture the shipped
 // defaults. Excluded from the "engine body" that must not repeat config
 // literals — the config layer, the loader/env-overlay, and the test-time
-// installer all touch the config values by design.
+// installer all touch the config values by design. `init.ts` is the scaffolder:
+// its `DEFAULT_TEMPLATE_PARAMS` deliberately holds the generic placeholders
+// (`your-org/your-repo`) it renders into a starter config — the same
+// placeholders the repo-root sample config carries — so it, too, owns config
+// literals by design rather than reading them through `config.*`.
 const CONFIG_LAYER_FILES = new Set([
   "config-schema.ts",
   "resolved-config.ts",
   "load-config.ts",
   "test-setup.ts",
+  "init.ts",
 ]);
 
 function walkSourceFiles(dir: string): string[] {

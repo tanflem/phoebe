@@ -14,11 +14,17 @@
 import type { PhoebeUserConfig } from "{{CLI_BIN}}";
 
 const config: PhoebeUserConfig = {
-  repoSlug: "your-org/your-repo",
-  repoUrl: "https://github.com/your-org/your-repo.git",
+  repoSlug: "{{REPO_SLUG}}",
+  repoUrl: "{{REPO_URL}}",
   installCommand: "{{INSTALL_COMMAND}}",
-  checkCommand: "npm run check",
-  testCommand: "npm test",
+  checkCommand: "{{CHECK_COMMAND}}",
+  testCommand: "{{TEST_COMMAND}}",
+
+  // Which agent CLI Phoebe runs by default: "claude", "cursor", or "codex".
+  // Override for a single run with the PHOEBE_AGENT env var. The matching
+  // provider key must be set in `.env` (see .env.example). `phoebe setup` picks
+  // this for you.
+  defaultProvider: "{{DEFAULT_PROVIDER}}",
 
   // Which engine `phoebe boot` runs. This is the upgrade knob: edit it and the
   // running container drains the engine and relaunches on the new code at the
