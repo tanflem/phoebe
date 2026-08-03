@@ -149,6 +149,20 @@ describe("resolveConfig", () => {
     expect(resolved.defaultModels.codex).toBe(CONFIG_DEFAULTS.defaultModels.codex);
   });
 
+  test("defaults claude reasoning effort to xhigh and leaves the others unset", () => {
+    const resolved = resolveConfig(minimalUserConfig());
+    expect(resolved.defaultEfforts.claude).toBe("xhigh");
+    expect(resolved.defaultEfforts.cursor).toBeUndefined();
+    expect(resolved.defaultEfforts.codex).toBeUndefined();
+  });
+
+  test("shallow-merges provider efforts: one override leaves the others", () => {
+    const resolved = resolveConfig(minimalUserConfig({ defaultEfforts: { codex: "high" } }));
+    expect(resolved.defaultEfforts.codex).toBe("high");
+    expect(resolved.defaultEfforts.claude).toBe(CONFIG_DEFAULTS.defaultEfforts.claude);
+    expect(resolved.defaultEfforts.cursor).toBe(CONFIG_DEFAULTS.defaultEfforts.cursor);
+  });
+
   test("shallow-merges provider env vars the same way", () => {
     const resolved = resolveConfig(minimalUserConfig({ providerEnv: { cursor: "MY_CURSOR_KEY" } }));
     expect(resolved.providerEnv.cursor).toBe("MY_CURSOR_KEY");

@@ -127,14 +127,15 @@ const worktreesDir = config.paths.worktreesDir;
 // Provider selection (multi-provider ready)
 // ---------------------------------------------------------------------------
 
-function selectProvider(): { provider: Provider; model: string } {
+function selectProvider(): { provider: Provider; model: string; effort: string | undefined } {
   const name = process.env["PHOEBE_AGENT"] ?? config.defaultProvider;
   if (!(PROVIDER_NAMES as readonly string[]).includes(name)) {
     throw new Error(`Unknown PHOEBE_AGENT "${name}". Use one of: ${PROVIDER_NAMES.join(", ")}.`);
   }
   const provider = PROVIDERS[name as ProviderName];
   const model = process.env["PHOEBE_MODEL"] ?? config.defaultModels[name as ProviderName];
-  return { provider, model };
+  const effort = process.env["PHOEBE_EFFORT"] ?? config.defaultEfforts[name as ProviderName];
+  return { provider, model, effort };
 }
 
 const workOrder = validateWorkOrder(config.workOrder);
@@ -461,7 +462,7 @@ async function runAgentInWorktree(opts: {
   promptFile: string;
   promptArgs: Record<string, string>;
 }): Promise<number> {
-  const { provider, model } = selectProvider();
+  const { provider, model, effort } = selectProvider();
   // Caller-supplied per-callsite args (ISSUE_NUMBER, PR_NUMBER, …) override
   // the standard config-derived set by key.
   const prompt = renderPrompt(
@@ -477,6 +478,7 @@ async function runAgentInWorktree(opts: {
   const { exitCode } = await runAgent({
     provider,
     model,
+    effort,
     prompt,
     cwd: opts.worktreeDir,
     env,

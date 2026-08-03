@@ -136,6 +136,9 @@ export type PhoebeConfig = {
   workOrder: readonly string[];
   defaultProvider: ProviderName;
   defaultModels: Record<ProviderName, string>;
+  /** Reasoning-effort flag passed to each provider's CLI. `undefined` ⇒ the
+   *  provider is invoked without an effort flag (the CLI's own default). */
+  defaultEfforts: Record<ProviderName, string | undefined>;
   /** Env var holding each provider's API key — the only key the agent child inherits. */
   providerEnv: Record<ProviderName, string>;
   /** Container filesystem layout (named volumes). */
@@ -146,9 +149,9 @@ export type PhoebeConfig = {
  * User-facing shape of `phoebe.config.ts`. Only the five fields with no sane
  * cross-repo default are required; everything else is optional and filled from
  * `CONFIG_DEFAULTS` by `resolveConfig()`. Nested objects (`promptFiles`,
- * `paths`, `defaultModels`, `providerEnv`) are merged key-by-key, so overriding
- * one provider's model or one prompt file does not force the caller to supply
- * the rest.
+ * `paths`, `defaultModels`, `defaultEfforts`, `providerEnv`) are merged
+ * key-by-key, so overriding one provider's model or one prompt file does not
+ * force the caller to supply the rest.
  */
 export type PhoebeUserConfig = {
   repoSlug: string;
@@ -176,6 +179,7 @@ export type PhoebeUserConfig = {
   workOrder?: readonly string[];
   defaultProvider?: ProviderName;
   defaultModels?: Partial<Record<ProviderName, string>>;
+  defaultEfforts?: Partial<Record<ProviderName, string | undefined>>;
   providerEnv?: Partial<Record<ProviderName, string>>;
   paths?: Partial<PathsConfig>;
 };
@@ -213,6 +217,11 @@ export const CONFIG_DEFAULTS = {
     claude: "claude-sonnet-4-6",
     codex: "gpt-5.4-mini",
   } satisfies Record<ProviderName, string>,
+  defaultEfforts: {
+    cursor: undefined,
+    claude: "xhigh",
+    codex: undefined,
+  } satisfies Record<ProviderName, string | undefined>,
   providerEnv: {
     cursor: "CURSOR_API_KEY",
     claude: "ANTHROPIC_API_KEY",
@@ -341,6 +350,7 @@ export function resolveConfig(user: PhoebeUserConfig): PhoebeConfig {
     workOrder: user.workOrder ?? CONFIG_DEFAULTS.workOrder,
     defaultProvider: user.defaultProvider ?? CONFIG_DEFAULTS.defaultProvider,
     defaultModels: { ...CONFIG_DEFAULTS.defaultModels, ...user.defaultModels },
+    defaultEfforts: { ...CONFIG_DEFAULTS.defaultEfforts, ...user.defaultEfforts },
     providerEnv: { ...CONFIG_DEFAULTS.providerEnv, ...user.providerEnv },
     paths: { ...CONFIG_DEFAULTS.paths, ...user.paths },
   };

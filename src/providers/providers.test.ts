@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vite-plus/test";
 import { PROVIDERS } from "./providers.ts";
+import { CONFIG_DEFAULTS } from "../config-schema.ts";
 
 describe("cursor provider", () => {
   test("builds a print-mode argv with the prompt as the final argument", () => {
@@ -16,6 +17,11 @@ describe("cursor provider", () => {
   test("rejects prompts too large for a single argv argument", () => {
     const huge = "x".repeat(121 * 1024);
     expect(() => PROVIDERS.cursor.buildCommand({ prompt: huge, model: "m" })).toThrow(/bytes/);
+  });
+
+  test("ignores effort — cursor has no effort flag", () => {
+    const cmd = PROVIDERS.cursor.buildCommand({ prompt: "p", model: "m", effort: "xhigh" });
+    expect(cmd.argv).not.toContain("--effort");
   });
 
   test("parses cursor top-level tool_call events", () => {
@@ -51,6 +57,29 @@ describe("claude provider", () => {
     expect(cmd.stdin).toBe("big prompt");
     const modelIdx = cmd.argv.indexOf("--model");
     expect(cmd.argv[modelIdx + 1]).toBe("claude-m");
+  });
+
+  test("passes the default reasoning effort as --effort right after the model", () => {
+    const cmd = PROVIDERS.claude.buildCommand({
+      prompt: "big prompt",
+      model: "claude-m",
+      effort: CONFIG_DEFAULTS.defaultEfforts.claude,
+    });
+    const modelIdx = cmd.argv.indexOf("--model");
+    expect(cmd.argv[modelIdx + 1]).toBe("claude-m");
+    expect(cmd.argv[modelIdx + 2]).toBe("--effort");
+    expect(cmd.argv[modelIdx + 3]).toBe("xhigh");
+  });
+
+  test("honors an overriding effort (e.g. from PHOEBE_EFFORT)", () => {
+    const cmd = PROVIDERS.claude.buildCommand({ prompt: "p", model: "claude-m", effort: "low" });
+    const effortIdx = cmd.argv.indexOf("--effort");
+    expect(cmd.argv[effortIdx + 1]).toBe("low");
+  });
+
+  test("omits --effort when no effort is configured", () => {
+    const cmd = PROVIDERS.claude.buildCommand({ prompt: "p", model: "claude-m" });
+    expect(cmd.argv).not.toContain("--effort");
   });
 
   test("parses assistant text and allowlisted tool_use blocks", () => {
@@ -89,6 +118,11 @@ describe("codex provider", () => {
     expect(cmd.stdin).toBe("fix it");
     const modelIdx = cmd.argv.indexOf("-m");
     expect(cmd.argv[modelIdx + 1]).toBe("gpt-m");
+  });
+
+  test("ignores effort — codex has no effort flag", () => {
+    const cmd = PROVIDERS.codex.buildCommand({ prompt: "fix it", model: "gpt-m", effort: "xhigh" });
+    expect(cmd.argv).not.toContain("--effort");
   });
 
   test("maps agent_message completion to text + result", () => {

@@ -221,6 +221,7 @@ Runtime toggles (read directly by the engine, not overlaid onto the config):
   PHOEBE_BASE_CONFIG     Absolute path to a versioned generated base config
   PHOEBE_AGENT           Provider name to use for this run (cursor|claude|codex)
   PHOEBE_MODEL           Model to use for this run
+  PHOEBE_EFFORT          Reasoning effort to use for this run (provider-dependent)
   PHOEBE_RUNTIME_ID      Stable identity for a new state volume
   PHOEBE_POLL_INTERVAL_MS Persistent-mode poll interval (default 300000)
 `;

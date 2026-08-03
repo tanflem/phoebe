@@ -21,6 +21,6 @@ export type AgentEvent =
 
 export type Provider = {
   readonly name: ProviderName;
-  buildCommand(opts: { prompt: string; model: string }): AgentCommand;
+  buildCommand(opts: { prompt: string; model: string; effort?: string }): AgentCommand;
   parseStreamLine(line: string): AgentEvent[];
 };

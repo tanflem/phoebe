@@ -78,6 +78,31 @@ describe("runAgent", () => {
     expect(result).toEqual({ exitCode: 0, resultText: "finished" });
   });
 
+  test("threads effort through to the provider command argv", async () => {
+    const fake = makeFakeChild();
+    let spawned: { args: readonly string[] } | null = null;
+    const spawn: SpawnAgent = (_file, args) => {
+      spawned = { args };
+      queueMicrotask(() => fake.close(0));
+      return fake.child;
+    };
+
+    await runAgent({
+      provider: PROVIDERS.claude,
+      model: "claude-m",
+      effort: "xhigh",
+      prompt: "p",
+      cwd: "/w",
+      env: {},
+      spawn,
+      log: () => {},
+    });
+
+    const effortIdx = spawned!.args.indexOf("--effort");
+    expect(effortIdx).toBeGreaterThanOrEqual(0);
+    expect(spawned!.args[effortIdx + 1]).toBe("xhigh");
+  });
+
   test("keeps the last result across chunk-split lines and maps failure exit codes", async () => {
     const fake = makeFakeChild();
     const spawn: SpawnAgent = () => {

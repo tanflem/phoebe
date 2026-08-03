@@ -188,7 +188,7 @@ const cursor: Provider = {
 
 const claude: Provider = {
   name: "claude",
-  buildCommand({ prompt, model }): AgentCommand {
+  buildCommand({ prompt, model, effort }): AgentCommand {
     return {
       argv: [
         "claude",
@@ -199,6 +199,7 @@ const claude: Provider = {
         "stream-json",
         "--model",
         model,
+        ...(effort !== undefined ? ["--effort", effort] : []),
         "-p",
         "-",
       ],
