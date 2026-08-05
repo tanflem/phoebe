@@ -205,8 +205,9 @@ export type PhoebeConfig = {
    */
   maxUnitTimeouts: number;
   /**
-   * Consecutive attempts that produce no commit before a PR-keyed unit
-   * (conflicts/checks) is quarantined (#25) — the fails-fast sibling of
+   * Consecutive no-progress attempts before a unit is quarantined — no commit
+   * for a PR-keyed unit (conflicts/checks, #25), or no resulting PR for an
+   * issue-keyed one (issues/research, #22) — the fails-fast sibling of
    * `maxUnitTimeouts`. Env-overridable via `PHOEBE_MAX_UNIT_ATTEMPTS`. Default 3.
    */
   maxUnitAttempts: number;
@@ -264,7 +265,7 @@ export type PhoebeUserConfig = {
   runTimeoutMs?: number;
   /** Consecutive timeouts before a unit is quarantined (#75); default 3. */
   maxUnitTimeouts?: number;
-  /** Consecutive no-commit attempts before a PR-keyed unit is quarantined (#25); default 3. */
+  /** Consecutive no-progress attempts before a unit is quarantined (#25, #22); default 3. */
   maxUnitAttempts?: number;
   /** Claim-lease TTL in ms before an orphaned claim is reclaimed (#15); default 30 min. */
   leaseTtlMs?: number;

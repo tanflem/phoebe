@@ -1077,6 +1077,47 @@ export function checksFailureSignature(failingChecks: readonly FailingCheck[]): 
   return slugifyFailureSignature(`checks-failed-${failingChecks.map((c) => c.name).join("-")}`);
 }
 
+/**
+ * Failure signature for an issue/research unit that ran and produced no PR
+ * (#22) — the verification command the agent's own report last failed on
+ * (e.g. `apply_patch`), so the cause is visible on the issue without
+ * container logs. Falls back to the agent's exit code, then a generic
+ * marker when neither signal is available (a clean exit with no commits).
+ */
+export function issueAttemptFailureSignature(opts: {
+  failedCommand?: string;
+  agentExitCode: number | null;
+}): string {
+  if (opts.failedCommand) {
+    return slugifyFailureSignature(`${opts.failedCommand}-failed`);
+  }
+  if (opts.agentExitCode !== null && opts.agentExitCode !== 0) {
+    return slugifyFailureSignature(`agent-exit-${opts.agentExitCode}`);
+  }
+  return "no-commit-produced";
+}
+
+/**
+ * Open issues that name `blockerIssueNumber` as a blocker (#22) — the
+ * dependents a quarantine comment names as "stays blocked", so the stalled
+ * chain is visible without walking the graph by hand.
+ */
+export function findBlockedDependents(
+  blockerIssueNumber: number,
+  issues: readonly Issue[],
+  nativeBlockersByIssue: NativeBlockerMap = new Map(),
+): number[] {
+  return issues
+    .filter(
+      (issue) =>
+        issue.number !== blockerIssueNumber &&
+        issueBlockers(issue, nativeBlockersByIssue.get(issue.number) ?? []).includes(
+          blockerIssueNumber,
+        ),
+    )
+    .map((issue) => issue.number);
+}
+
 export function conflictFixFailureComment(
   prNumber: PrNumber,
   watermark?: ConflictFailWatermark,

@@ -17,6 +17,7 @@ import {
   conflictFailureSignature,
   conflictFixFailureComment,
   filterBackoffEligible,
+  findBlockedDependents,
   followUpPrComment,
   formatFailingChecksForPrompt,
   hasNewNonPhoebeReviewActivity,
@@ -24,6 +25,7 @@ import {
   isPrInScope,
   isPrMergeConflicting,
   isReviewSummaryComment,
+  issueAttemptFailureSignature,
   issueBranch,
   issueBlockers,
   listFailingChecks,
@@ -1966,6 +1968,53 @@ describe("checksFailureSignature", () => {
     expect(checksFailureSignature([{ name: "lint", conclusion: "failure" }])).toBe(
       "checks-failed-lint",
     );
+  });
+});
+
+describe("issueAttemptFailureSignature (#22)", () => {
+  test("embeds the verification report's failed command", () => {
+    expect(issueAttemptFailureSignature({ failedCommand: "apply_patch", agentExitCode: 1 })).toBe(
+      "apply-patch-failed",
+    );
+  });
+  test("falls back to the agent exit code with no verification report", () => {
+    expect(issueAttemptFailureSignature({ agentExitCode: 2 })).toBe("agent-exit-2");
+  });
+  test("falls back to a generic marker with no signal at all", () => {
+    expect(issueAttemptFailureSignature({ agentExitCode: null })).toBe("no-commit-produced");
+    expect(issueAttemptFailureSignature({ agentExitCode: 0 })).toBe("no-commit-produced");
+  });
+});
+
+describe("findBlockedDependents (#22)", () => {
+  test("finds open issues that name the quarantined issue as a body blocker", () => {
+    const issues = [
+      issue({ number: 763, body: "Blocked by #784" }),
+      issue({ number: 700, body: "Blocked by #784\nAlso relates to #1" }),
+      issue({ number: 900, body: "unrelated" }),
+    ];
+    expect(findBlockedDependents(784, issues)).toEqual([763, 700]);
+  });
+
+  test("finds dependents via native blockers", () => {
+    setResolvedConfig(resolveConfig({ ...sampleUserConfig, blockerSource: "native" }));
+    try {
+      const issues = [issue({ number: 50, body: "no body refs" })];
+      const nativeBlockersByIssue = new Map([[50, [784]]]);
+      expect(findBlockedDependents(784, issues, nativeBlockersByIssue)).toEqual([50]);
+    } finally {
+      setResolvedConfig(resolveConfig(sampleUserConfig));
+    }
+  });
+
+  test("excludes the issue itself even if self-referential", () => {
+    const issues = [issue({ number: 784, body: "Blocked by #784" })];
+    expect(findBlockedDependents(784, issues)).toEqual([]);
+  });
+
+  test("empty when nothing depends on it", () => {
+    const issues = [issue({ number: 1, body: "" })];
+    expect(findBlockedDependents(784, issues)).toEqual([]);
   });
 });
 

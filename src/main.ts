@@ -86,9 +86,11 @@ import {
   conflictFailureSignature,
   conflictFixFailureComment,
   filterBackoffEligible,
+  findBlockedDependents,
   followUpPrComment,
   formatFailingChecksForPrompt,
   isReviewSummaryComment,
+  issueAttemptFailureSignature,
   issueBranch,
   isPrInScope,
   isPrMergeConflicting,
@@ -612,16 +614,47 @@ function issueBody(issueNumber: number): string {
   return ghJson<{ body: string }>(["issue", "view", String(issueNumber), "--json", "body"]).body;
 }
 
-/** All comment bodies on an issue, oldest first — the raw input to the #15 lease-marker lookup. */
-function fetchIssueCommentBodies(issueNumber: number): string[] {
-  const { comments } = ghJson<{ comments: Array<{ body: string }> }>([
+/** ISO timestamp of an issue's last edit — the #22/#75 auto-unstick baseline for issue-keyed units. */
+function issueUpdatedAt(issueNumber: number): string {
+  return ghJson<{ updatedAt: string }>([
+    "issue",
+    "view",
+    String(issueNumber),
+    "--json",
+    "updatedAt",
+  ]).updatedAt;
+}
+
+type IssueComment = { id: string; body: string };
+
+/** Every comment on an issue (id + body), oldest first — the raw input to every marker parse. */
+function fetchIssueComments(issueNumber: number): IssueComment[] {
+  const { comments } = ghJson<{ comments: IssueComment[] }>([
     "issue",
     "view",
     String(issueNumber),
     "--json",
     "comments",
   ]);
-  return comments.map((comment) => comment.body);
+  return comments;
+}
+
+/** All comment bodies on an issue, oldest first — the raw input to the #15 lease-marker lookup. */
+function fetchIssueCommentBodies(issueNumber: number): string[] {
+  return fetchIssueComments(issueNumber).map((comment) => comment.body);
+}
+
+/** Post `body` as a new issue comment, or edit `existingCommentId` in place if one is given. */
+function postOrUpdateIssueComment(
+  issueNumber: number,
+  body: string,
+  existingCommentId: string | undefined,
+): void {
+  if (existingCommentId) {
+    updateComment(existingCommentId, body);
+  } else {
+    postIssueComment(issueNumber, body);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -701,6 +734,82 @@ function recordFailedAttempt(opts: {
       `[phoebe] Quarantined ${opts.kind} unit for PR #${opts.prNumber} after ${plan.marker.n} attempts with no commit (${opts.signature}).`,
     );
   }
+}
+
+/**
+ * Record one failed (no-PR) claim→release cycle on an issue-keyed unit (#22):
+ * the issues/research sibling of `recordFailedAttempt` (#25), since these
+ * units fail fast at verification rather than hang, so #75's timeout counter
+ * never sees them. `ref` is fixed to the issue number rather than a moving
+ * head SHA — an issue-keyed unit has no in-progress ref to stale-check
+ * against, so the reset on progress is explicit (`resetIssueAttemptCounter`)
+ * instead of inferred from `ref` advancing.
+ */
+function recordFailedIssueAttempt(opts: {
+  kind: "issues" | "research";
+  issueNumber: number;
+  signature: string;
+  dependentsPool: readonly Issue[];
+  nativeBlockersByIssue: NativeBlockerMap;
+}): void {
+  const comments = fetchIssueComments(opts.issueNumber);
+  const found = findLatestUnitAttemptComment(comments, opts.kind);
+  const k = resolveMaxUnitAttempts(process.env, config.maxUnitAttempts);
+  const plan = planUnitAttempt({
+    previous: found?.marker ?? null,
+    ref: String(opts.issueNumber),
+    signature: opts.signature,
+    now: new Date().toISOString(),
+    k,
+  });
+
+  const body = plan.quarantined
+    ? buildQuarantineComment({
+        kind: opts.kind,
+        id: opts.issueNumber,
+        k,
+        baseline: issueUpdatedAt(opts.issueNumber),
+        reason: "was claimed and released with no PR",
+        signature: opts.signature,
+        dependents: findBlockedDependents(
+          opts.issueNumber,
+          opts.dependentsPool,
+          opts.nativeBlockersByIssue,
+        ),
+      })
+    : `⚠️ Phoebe claimed this ${opts.kind === "issues" ? "issue" : "research ticket"} and released it ` +
+      `with no PR (attempt ${plan.marker.n}/${k}, \`${opts.signature}\`). It stays in the ready queue ` +
+      `and will retry once the claim lease expires.`;
+  postOrUpdateIssueComment(
+    opts.issueNumber,
+    `${body}\n\n${buildUnitAttemptMarker(opts.kind, plan.marker)}`,
+    found?.commentId,
+  );
+
+  if (plan.quarantined) {
+    gh(["issue", "edit", String(opts.issueNumber), "--add-label", PHOEBE_QUARANTINE_LABEL]);
+    console.log(
+      `[phoebe] Quarantined ${opts.kind} #${opts.issueNumber} after ${plan.marker.n} claims with no PR (${opts.signature}).`,
+    );
+  }
+}
+
+/**
+ * Clear the #22 no-PR attempt counter once a run produces a PR: edit the
+ * tracking comment (if any) to drop the marker, so the next failure's
+ * `findLatestUnitAttemptComment` reads no prior marker and starts at 1 again.
+ * A unit that never failed has no tracking comment — nothing to reset.
+ */
+function resetIssueAttemptCounter(issueNumber: number, kind: "issues" | "research"): void {
+  const comments = fetchIssueComments(issueNumber);
+  const found = findLatestUnitAttemptComment(comments, kind);
+  if (!found) {
+    return;
+  }
+  updateComment(
+    found.commentId,
+    `✅ Phoebe produced a PR for this ${kind === "issues" ? "issue" : "research ticket"} — the no-PR attempt counter is reset.`,
+  );
 }
 
 function gitInWorktree(
@@ -1346,6 +1455,9 @@ async function runOneIssue(opts: {
   promptFile: string;
   blockerIssueNumber?: number;
   blockerPrNumber?: PrNumber;
+  attemptKind: "issues" | "research";
+  dependentsPool: readonly Issue[];
+  nativeBlockersByIssue: NativeBlockerMap;
 }): Promise<UnitResult> {
   const { issueNumber, issueTitle, worktreeBase, stacked, promptFile } = opts;
   const { blockerIssueNumber, blockerPrNumber } = opts;
@@ -1369,17 +1481,23 @@ async function runOneIssue(opts: {
 
     if (newCommitCount > 0) {
       pushBranch(worktreeDir, agentBranch);
-      const existingPrRow = ghJson<Array<{ number: number }>>([
-        "pr",
-        "list",
-        "--head",
-        agentBranch,
-        "--state",
-        "open",
-        "--json",
-        "number",
-      ])[0];
-      const existingPr = existingPrRow ? asPrNumber(existingPrRow.number) : undefined;
+    }
+    // Looked up regardless of `newCommitCount` (#22): an issue reclaimed after
+    // its PR already opened must read as "has a PR", not as a fresh no-progress
+    // attempt, even when this particular run added nothing.
+    const existingPrRow = ghJson<Array<{ number: number }>>([
+      "pr",
+      "list",
+      "--head",
+      agentBranch,
+      "--state",
+      "open",
+      "--json",
+      "number",
+    ])[0];
+    const existingPr = existingPrRow ? asPrNumber(existingPrRow.number) : undefined;
+
+    if (newCommitCount > 0) {
       if (existingPr === undefined) {
         // Which base branch, whether to add the stacked banner, and whether to
         // register a native GitHub stack — all decided purely from stackMode +
@@ -1430,6 +1548,24 @@ async function runOneIssue(opts: {
     } else {
       console.log("[phoebe] No commits — skipping PR creation.");
     }
+
+    // #22: count claim→release cycles that end with no PR for this issue, and
+    // quarantine at threshold — the fails-fast sibling of #75's timeout
+    // counter for issue-keyed units. A PR now existing (just created, already
+    // open, or found for an issue reclaimed mid-review) resets the counter.
+    if (newCommitCount > 0 || existingPr !== undefined) {
+      resetIssueAttemptCounter(issueNumber, opts.attemptKind);
+    } else {
+      const failedCommand = verification?.find((v) => v.status === "failed")?.command;
+      recordFailedIssueAttempt({
+        kind: opts.attemptKind,
+        issueNumber,
+        signature: issueAttemptFailureSignature({ failedCommand, agentExitCode }),
+        dependentsPool: opts.dependentsPool,
+        nativeBlockersByIssue: opts.nativeBlockersByIssue,
+      });
+    }
+
     return { exitCode: agentExitCode, verification };
   } finally {
     removeVerificationReport(reportPath);
@@ -1450,6 +1586,9 @@ type RunContext = {
   stack: StackContext;
   phoebeLogin: string;
   runtimeId: string;
+  /** issues + researchIssues from this cycle's fetch — the pool `findBlockedDependents` (#22) scans. */
+  dependentsPool: readonly Issue[];
+  nativeBlockersByIssue: NativeBlockerMap;
 };
 
 type WorkKind = {
@@ -1734,8 +1873,9 @@ function fetchResearchWorkData(): {
   };
 }
 
-async function runIssueUnit(unit: IssueWorkUnit, runtimeId: string): Promise<UnitResult> {
+async function runIssueUnit(unit: IssueWorkUnit, context: RunContext): Promise<UnitResult> {
   const { issue: target, resolution } = unit;
+  const { runtimeId } = context;
   console.log(
     `[phoebe] Working #${target.number} — base ${resolution.worktreeBase}` +
       (resolution.stacked ? ` (stacked on #${resolution.blockerIssueNumber})` : "") +
@@ -1764,13 +1904,16 @@ async function runIssueUnit(unit: IssueWorkUnit, runtimeId: string): Promise<Uni
       promptFile: config.promptFiles.issue,
       blockerIssueNumber: resolution.blockerIssueNumber,
       blockerPrNumber: resolution.blockerPrNumber,
+      attemptKind: "issues",
+      dependentsPool: context.dependentsPool,
+      nativeBlockersByIssue: context.nativeBlockersByIssue,
     });
   } finally {
     stopHeartbeat();
   }
 }
 
-async function runResearchUnit(unit: IssueWorkUnit): Promise<UnitResult> {
+async function runResearchUnit(unit: IssueWorkUnit, context: RunContext): Promise<UnitResult> {
   const { issue: target, resolution } = unit;
   console.log(
     `[phoebe] Researching #${target.number} — base ${resolution.worktreeBase}` +
@@ -1785,6 +1928,9 @@ async function runResearchUnit(unit: IssueWorkUnit): Promise<UnitResult> {
     promptFile: config.promptFiles.research,
     blockerIssueNumber: resolution.blockerIssueNumber,
     blockerPrNumber: resolution.blockerPrNumber,
+    attemptKind: "research",
+    dependentsPool: context.dependentsPool,
+    nativeBlockersByIssue: context.nativeBlockersByIssue,
   });
 }
 
@@ -1826,7 +1972,7 @@ const KINDS: Record<WorkKindName, WorkKind> = {
       return { kind: "issues", issues, blockerStates, nativeBlockersByIssue };
     },
     runUnit: async (unit, context) => {
-      return runIssueUnit(unit as IssueWorkUnit, context.runtimeId);
+      return runIssueUnit(unit as IssueWorkUnit, context);
     },
   },
   research: {
@@ -1835,8 +1981,8 @@ const KINDS: Record<WorkKindName, WorkKind> = {
       const { researchIssues, blockerStates, nativeBlockersByIssue } = fetchResearchWorkData();
       return { kind: "research", researchIssues, blockerStates, nativeBlockersByIssue };
     },
-    runUnit: async (unit) => {
-      return runResearchUnit(unit as IssueWorkUnit);
+    runUnit: async (unit, context) => {
+      return runResearchUnit(unit as IssueWorkUnit, context);
     },
   },
 };
@@ -2317,6 +2463,8 @@ async function runLoop({
           stack: { issueBodies: data.issueBodies, blockerStates: data.blockerStates },
           phoebeLogin: data.phoebeLogin ?? "",
           runtimeId: status.snapshot().runtime.runtimeId,
+          dependentsPool: [...data.issues, ...data.researchIssues],
+          nativeBlockersByIssue: data.nativeBlockersByIssue,
         },
       );
       const pullRequestNumber = pullRequestNumberAfterWork(picked);
