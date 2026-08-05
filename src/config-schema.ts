@@ -39,8 +39,11 @@ export type BlockerSource = (typeof BLOCKER_SOURCES)[number];
  *  - `native`: true GitHub stacked PRs. The branch is cut off the blocker's
  *    branch exactly as in `banner`, but the PR is opened *against the blocker's
  *    branch* and registered into a native GitHub stack via `gh stack link`, so
- *    the PR diff shows only this issue's commits and GitHub owns
- *    retarget-on-merge. The banner and catch-up-merge steps are skipped.
+ *    the PR diff shows only this issue's commits. GitHub only retargets a PR
+ *    onto `main` on its own when the base branch is *deleted*; tenant repos
+ *    keep merged branches around, so the engine retargets explicitly instead
+ *    (`retargetMergedStackedPrs` in main.ts, run every cycle). The banner and
+ *    catch-up-merge steps are skipped.
  *  - `off`: no stacking at all. Even with an open blocker PR the branch is cut
  *    off `origin/main` and the PR opened against `defaultBranch` with no banner.
  *    Blockers are still honored for the skip decision.

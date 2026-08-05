@@ -106,7 +106,9 @@ import {
   nativeStackGitConfig,
   oneShotWorkKinds,
   resolveStackedPrPlan,
+  selectStackRetargetCandidates,
   stackedCatchUpRetractionComment,
+  stackRetargetedComment,
   RUN_ONCE_NOTHING_MESSAGE,
   selectFirstWorkUnit,
   selectIssue,
@@ -1049,6 +1051,58 @@ async function runConflictResolutionAgent(
       }
     },
   });
+}
+
+/**
+ * Native-stack retarget sweep (#13): a native-mode successor PR is opened
+ * against its blocker's branch (`resolveStackedPrPlan`), and GitHub only
+ * auto-retargets a PR onto `main` when that base branch is *deleted*. Tenant
+ * repos run `delete_branch_on_merge=false`, so once the blocker's PR merges its
+ * branch survives and the successor's base never moves on its own — an
+ * automerge step with no base filter would then squash the successor into the
+ * stale blocker branch instead of `main`, losing its work silently. This
+ * explicitly retargets every open Phoebe PR whose base is a merged blocker's
+ * branch back onto `defaultBranch`. Harmless (and a no-op) under `banner`/`off`
+ * stack modes, since only `native` ever bases a PR on another Phoebe branch.
+ */
+function retargetMergedStackedPrs(): void {
+  const openPrs = listOpenPhoebePrs();
+  const blockerIssueNumbers = new Set<number>();
+  for (const pr of openPrs) {
+    const blockerIssueNumber = parseIssueNumberFromBranch(pr.baseRefName);
+    if (blockerIssueNumber !== null) {
+      blockerIssueNumbers.add(blockerIssueNumber);
+    }
+  }
+  if (blockerIssueNumbers.size === 0) {
+    return;
+  }
+
+  const blockerStates = new Map<number, BlockerPrState>();
+  for (const blockerIssueNumber of blockerIssueNumbers) {
+    try {
+      blockerStates.set(blockerIssueNumber, blockerPrState(blockerIssueNumber));
+    } catch (error) {
+      console.warn(
+        `[phoebe] Skipping stack-retarget check for blocker #${blockerIssueNumber} this cycle — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  const candidates = openPrs.map((pr) => ({ prNumber: pr.number, baseRefName: pr.baseRefName }));
+  for (const pr of selectStackRetargetCandidates(candidates, blockerStates)) {
+    console.log(
+      `[phoebe] Retargeting PR #${pr.prNumber} from ${pr.baseRefName} to ${config.defaultBranch} — blocker merged.`,
+    );
+    try {
+      gh(["pr", "edit", String(pr.prNumber), "--base", config.defaultBranch]);
+      postPrComment(pr.prNumber, stackRetargetedComment(config.defaultBranch));
+    } catch (error) {
+      console.warn(
+        `[phoebe] Failed to retarget PR #${pr.prNumber} — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
 }
 
 async function fixOnePrConflict(
@@ -2227,6 +2281,9 @@ async function runLoop({
     // thrash-retrying) its own just-failed unit.
     if (inContainer && !dryRun) {
       reclaimStaleClaims(status.snapshot().runtime.runtimeId, { forceOwnReclaim: false });
+      // #13: keep native-stack successor PRs from being stranded on a merged,
+      // undeleted blocker branch — see retargetMergedStackedPrs.
+      retargetMergedStackedPrs();
     }
     status.record({ kind: "selecting" });
     const fetchKinds = runOnce ? oneShotWorkKinds(workOrder) : workOrder;

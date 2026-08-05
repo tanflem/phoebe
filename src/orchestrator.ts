@@ -128,6 +128,14 @@ export function issueBranch(issueNumber: number): BranchRef {
  * Resolve the worktree base for an issue.
  * Returns `null` when the issue should be skipped this cycle (blocked with no
  * open/merged blocker PR).
+ *
+ * A diamond/multi-blocker issue (#13) must gate on *every* blocker, not just
+ * the first: any blocker with no PR at all yet parks the issue, exactly as the
+ * single-blocker case always has. Once every blocker has at least an open PR,
+ * the issue is workable — stacked on whichever blocker is still unmerged
+ * (the last one in blocker-list order, so a diamond re-bases forward as each
+ * of its parents merges in turn) unless every blocker has already merged, in
+ * which case the branch cuts off `main` same as an unblocked issue.
  */
 export function resolveWorktreeBase(
   issue: Issue,
@@ -145,33 +153,40 @@ export function resolveWorktreeBase(
     return { worktreeBase: "origin/main", stacked: false };
   }
 
-  const blockerIssueNumber = blockers[0]!;
-  const state = blockerStates.get(blockerIssueNumber);
-  if (!state) {
-    return null;
-  }
-
-  if (state.hasOpenPr) {
-    // `off` still honors the blocker for the skip decision above, but never
-    // stacks: the branch is cut off main and no banner is added downstream.
-    if (stackMode === "off") {
-      return { worktreeBase: "origin/main", stacked: false };
+  let lastUnmergedBlocker: { issueNumber: number; state: BlockerPrState } | null = null;
+  for (const blockerIssueNumber of blockers) {
+    const state = blockerStates.get(blockerIssueNumber);
+    if (!state) {
+      return null;
     }
-    // `banner` and `native` both cut the branch off the blocker's tip; they
-    // diverge only in the PR base + banner, decided by `resolveStackedPrPlan`.
-    return {
-      worktreeBase: `origin/${issueBranch(blockerIssueNumber)}`,
-      stacked: true,
-      blockerIssueNumber,
-      blockerPrNumber: state.openPrNumber,
-    };
+    if (state.hasMergedPr) {
+      continue;
+    }
+    if (!state.hasOpenPr) {
+      return null;
+    }
+    lastUnmergedBlocker = { issueNumber: blockerIssueNumber, state };
   }
 
-  if (state.hasMergedPr) {
+  if (!lastUnmergedBlocker) {
+    // Every blocker has merged.
     return { worktreeBase: "origin/main", stacked: false };
   }
 
-  return null;
+  // `off` still honors every blocker for the skip decision above, but never
+  // stacks: the branch is cut off main and no banner is added downstream.
+  if (stackMode === "off") {
+    return { worktreeBase: "origin/main", stacked: false };
+  }
+
+  // `banner` and `native` both cut the branch off the unmerged blocker's tip;
+  // they diverge only in the PR base + banner, decided by `resolveStackedPrPlan`.
+  return {
+    worktreeBase: `origin/${issueBranch(lastUnmergedBlocker.issueNumber)}`,
+    stacked: true,
+    blockerIssueNumber: lastUnmergedBlocker.issueNumber,
+    blockerPrNumber: lastUnmergedBlocker.state.openPrNumber,
+  };
 }
 
 /** Pick the highest-priority workable issue, or `null` when none qualify. */
@@ -480,6 +495,42 @@ export function stackedCatchUpRetractionComment(blockerPrNumbers: readonly PrNum
   return (
     `Blockers ${list} merged; this branch has been caught up to \`main\` ` +
     `and is now independently mergeable.`
+  );
+}
+
+export type StackRetargetCandidate = {
+  prNumber: PrNumber;
+  baseRefName: BranchRef;
+};
+
+/**
+ * Open Phoebe PRs whose base is a native-stack blocker branch (#13) whose own
+ * PR has since merged. GitHub only auto-retargets a PR onto its grandparent
+ * when the base branch is *deleted*; tenant repos run
+ * `delete_branch_on_merge=false`, so a merged blocker's branch survives and
+ * nothing else ever moves its successor's base off it. `blockerStates` here is
+ * keyed by the blocker issue number parsed straight out of each candidate's
+ * `baseRefName` — the base branch name *is* the evidence of the native stack,
+ * independent of `blocked by` body/native refs.
+ */
+export function selectStackRetargetCandidates<T extends StackRetargetCandidate>(
+  prs: readonly T[],
+  blockerStates: ReadonlyMap<number, BlockerPrState>,
+): T[] {
+  return prs.filter((pr) => {
+    const blockerIssueNumber = parseIssueNumberFromBranch(pr.baseRefName);
+    if (blockerIssueNumber === null) {
+      return false;
+    }
+    return blockerStates.get(blockerIssueNumber)?.hasMergedPr === true;
+  });
+}
+
+/** Posted after a successor PR's base is moved from a merged blocker's branch to `defaultBranch` (#13). */
+export function stackRetargetedComment(defaultBranch: string): string {
+  return (
+    `Blocker merged; this PR's base has been retargeted to \`${defaultBranch}\` ` +
+    `so it can merge independently.`
   );
 }
 

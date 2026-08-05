@@ -47,6 +47,7 @@ import {
   selectFirstWorkUnit,
   selectIssue,
   selectReviewsUnit,
+  selectStackRetargetCandidates,
   summarizeChecksSelection,
   summarizeConflictSelection,
   summarizeReviewsSelection,
@@ -64,6 +65,7 @@ import {
   slugifyFailureSignature,
   stackedCatchUpRetractionComment,
   stackedPrComment,
+  stackRetargetedComment,
   type BlockerPrState,
   type ChecksCandidate,
   type ConflictingPrCandidate,
@@ -280,6 +282,65 @@ describe("resolveWorktreeBase", () => {
       stacked: true,
       blockerIssueNumber: 98,
       blockerPrNumber: 104,
+    });
+  });
+
+  describe("multi-blocker (#13)", () => {
+    test("skips when any blocker has no PR at all yet, even if others are open", () => {
+      const blocked = issue({ number: 102, body: "Blocked by #98\nBlocked by #99" });
+      const states = new Map<number, BlockerPrState>([
+        [98, { hasOpenPr: true, openPrNumber: asPrNumber(104), hasMergedPr: false }],
+        [99, { hasOpenPr: false, hasMergedPr: false }],
+      ]);
+      expect(resolveWorktreeBase(blocked, states)).toBeNull();
+    });
+
+    test("bases off main once every blocker has merged", () => {
+      const blocked = issue({ number: 102, body: "Blocked by #98\nBlocked by #99" });
+      const states = new Map<number, BlockerPrState>([
+        [98, { hasOpenPr: false, hasMergedPr: true, mergedPrNumber: asPrNumber(104) }],
+        [99, { hasOpenPr: false, hasMergedPr: true, mergedPrNumber: asPrNumber(105) }],
+      ]);
+      expect(resolveWorktreeBase(blocked, states)).toEqual({
+        worktreeBase: "origin/main",
+        stacked: false,
+      });
+    });
+
+    test("stacks on the still-unmerged blocker when one of two has merged", () => {
+      const blocked = issue({ number: 102, body: "Blocked by #98\nBlocked by #99" });
+      const states = new Map<number, BlockerPrState>([
+        [98, { hasOpenPr: false, hasMergedPr: true, mergedPrNumber: asPrNumber(104) }],
+        [99, { hasOpenPr: true, openPrNumber: asPrNumber(107), hasMergedPr: false }],
+      ]);
+      expect(resolveWorktreeBase(blocked, states)).toEqual({
+        worktreeBase: `origin/${issueBranch(99)}`,
+        stacked: true,
+        blockerIssueNumber: 99,
+        blockerPrNumber: 107,
+      });
+    });
+
+    test("stacks on the last-listed unmerged blocker when several are still open", () => {
+      const blocked = issue({ number: 102, body: "Blocked by #98\nBlocked by #99" });
+      const states = new Map<number, BlockerPrState>([
+        [98, { hasOpenPr: true, openPrNumber: asPrNumber(104), hasMergedPr: false }],
+        [99, { hasOpenPr: true, openPrNumber: asPrNumber(107), hasMergedPr: false }],
+      ]);
+      expect(resolveWorktreeBase(blocked, states)).toEqual({
+        worktreeBase: `origin/${issueBranch(99)}`,
+        stacked: true,
+        blockerIssueNumber: 99,
+        blockerPrNumber: 107,
+      });
+    });
+
+    test("skips when one blocker's state is entirely unknown", () => {
+      const blocked = issue({ number: 102, body: "Blocked by #98\nBlocked by #99" });
+      const states = new Map<number, BlockerPrState>([
+        [98, { hasOpenPr: true, openPrNumber: asPrNumber(104), hasMergedPr: false }],
+      ]);
+      expect(resolveWorktreeBase(blocked, states)).toBeNull();
     });
   });
 });
@@ -602,6 +663,43 @@ describe("stackedCatchUpRetractionComment", () => {
     const comment = stackedCatchUpRetractionComment([asPrNumber(110), asPrNumber(111)]);
     expect(comment).toContain("#110");
     expect(comment).toContain("#111");
+  });
+});
+
+describe("selectStackRetargetCandidates", () => {
+  test("selects a PR based on a blocker branch whose PR has merged", () => {
+    const prs = [{ prNumber: asPrNumber(200), baseRefName: issueBranch(98) }];
+    const states = new Map<number, BlockerPrState>([
+      [98, { hasOpenPr: false, hasMergedPr: true, mergedPrNumber: asPrNumber(104) }],
+    ]);
+    expect(selectStackRetargetCandidates(prs, states)).toEqual(prs);
+  });
+
+  test("ignores a PR based on a blocker branch whose PR is still open", () => {
+    const prs = [{ prNumber: asPrNumber(200), baseRefName: issueBranch(98) }];
+    const states = new Map<number, BlockerPrState>([
+      [98, { hasOpenPr: true, openPrNumber: asPrNumber(104), hasMergedPr: false }],
+    ]);
+    expect(selectStackRetargetCandidates(prs, states)).toEqual([]);
+  });
+
+  test("ignores a PR already based on defaultBranch (not a stack branch)", () => {
+    const prs = [{ prNumber: asPrNumber(200), baseRefName: asBranchRef("main") }];
+    const states = new Map<number, BlockerPrState>();
+    expect(selectStackRetargetCandidates(prs, states)).toEqual([]);
+  });
+
+  test("ignores a PR whose base blocker has no known state", () => {
+    const prs = [{ prNumber: asPrNumber(200), baseRefName: issueBranch(98) }];
+    expect(selectStackRetargetCandidates(prs, new Map())).toEqual([]);
+  });
+});
+
+describe("stackRetargetedComment", () => {
+  test("names the default branch", () => {
+    const comment = stackRetargetedComment("main");
+    expect(comment).toContain("`main`");
+    expect(comment).toContain("retargeted");
   });
 });
 
