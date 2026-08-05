@@ -5,6 +5,7 @@ import {
   STATUS_SCHEMA_VERSION,
   type FailureCategory,
   type NormalizedOutcome,
+  type QueueEntry,
   type StatusSnapshot,
   type WorkIdentity,
   type WorkKind,
@@ -144,6 +145,7 @@ export function createRuntimeStatusReporter(options: {
 }): {
   record: (transition: RuntimeStatusTransition) => StatusSnapshot;
   snapshot: () => StatusSnapshot;
+  setQueue: (queue: readonly QueueEntry[]) => StatusSnapshot;
 } {
   const now = options.now ?? (() => new Date());
   const randomId = options.randomId ?? randomUUID;
@@ -185,6 +187,7 @@ export function createRuntimeStatusReporter(options: {
     capabilities: CAPABILITIES,
     lifecycle: { state: "starting" },
     activeWork: null,
+    queue: previousSnapshot?.queue ?? [],
     lastSuccess:
       previousSnapshot?.lastSuccess ?? (replayedSuccess ? outcomeSummary(replayedSuccess) : null),
     lastFailure:
@@ -430,6 +433,14 @@ export function createRuntimeStatusReporter(options: {
     return snapshot;
   };
 
+  const setQueue = (queue: readonly QueueEntry[]): StatusSnapshot => {
+    const at = now().toISOString();
+    snapshot.updatedAt = at;
+    snapshot.queue = queue;
+    persist(at);
+    return snapshot;
+  };
+
   persist(startedAt);
-  return { record, snapshot: () => snapshot };
+  return { record, snapshot: () => snapshot, setQueue };
 }

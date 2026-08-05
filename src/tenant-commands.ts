@@ -28,6 +28,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { REPOS_DIR, TENANT_CONFIG_FILE, TENANT_ENV_FILE } from "../bootstrap/tenants.ts";
+import { ContractCapabilityError, type QueueEntry } from "./status-contract.ts";
+import { readStatusSnapshot } from "./status-store.ts";
 import { readStatus, STATUS_FILE, type StatusSnapshot } from "./unit-event.ts";
 
 /**
@@ -185,11 +187,29 @@ export type TenantListing = {
   envPresent: boolean;
   retainedData: boolean;
   status: StatusSnapshot | null;
+  /** The status-v2 `queue` lookahead, or `[]` when no contract snapshot is readable yet. */
+  queue: readonly QueueEntry[];
 };
 
 /** Whether a `.env` (not just the example) is present for a tenant dir. */
 function envPresent(dir: string): boolean {
   return existsSync(join(dir, TENANT_ENV_FILE));
+}
+
+/**
+ * Read the status-v2 contract snapshot's `queue` for one tenant's state dir.
+ * Tolerant by design — a missing/corrupt snapshot or a stale pre-v2 one (from
+ * before an engine upgrade) must not break `phoebe list`, so this reduces every
+ * failure mode to an empty lookahead rather than surfacing it.
+ */
+function readTenantQueue(stateDir: string): readonly QueueEntry[] {
+  try {
+    const result = readStatusSnapshot(stateDir);
+    return result.available ? result.status.queue : [];
+  } catch (error) {
+    if (error instanceof ContractCapabilityError) return [];
+    throw error;
+  }
 }
 
 /** Enumerate every nested tenant with its health signals for `phoebe list`. */
@@ -217,12 +237,14 @@ export function listTenants(opts: { configDir: string; dataBase: string }): Tena
       const slug = `${owner}/${repo}`;
       const dir = join(reposRoot, owner, repo);
       const dataDir = join(opts.dataBase, slug);
+      const stateDir = join(dataDir, "state");
       listings.push({
         slug,
         configValid: existsSync(join(dir, TENANT_CONFIG_FILE)),
         envPresent: envPresent(dir),
         retainedData: existsSync(dataDir),
-        status: readStatus(join(dataDir, "state", STATUS_FILE)),
+        status: readStatus(join(stateDir, STATUS_FILE)),
+        queue: readTenantQueue(stateDir),
       });
     }
   }

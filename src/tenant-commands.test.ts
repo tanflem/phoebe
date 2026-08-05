@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vite-plus/test";
+import { STATUS_SNAPSHOT_FILE } from "./status-store.ts";
 import {
   addRepo,
   defaultRepoUrl,
@@ -17,6 +18,44 @@ import {
   removeRepo,
   renderTenantConfig,
 } from "./tenant-commands.ts";
+
+const MINIMAL_STATUS_V2 = {
+  schemaVersion: "status-v2",
+  updatedAt: "2026-07-30T12:00:00.000Z",
+  runtime: {
+    runtimeId: "runtime-1",
+    instanceId: "instance-1",
+    startedAt: "2026-07-30T12:00:00.000Z",
+  },
+  repository: { slug: "acme/widget", url: "https://github.com/acme/widget", defaultBranch: "main" },
+  digests: {
+    engine: "sha256:e",
+    bootstrap: "sha256:b",
+    config: "sha256:c",
+    policy: "sha256:p",
+    prompts: "sha256:pr",
+    providerModel: "sha256:pm",
+  },
+  capabilities: ["status-v2"],
+  lifecycle: { state: "idle" },
+  activeWork: null,
+  lastSuccess: null,
+  lastFailure: null,
+  control: {
+    retry: { attempt: 0 },
+    backoff: { active: false },
+    quarantine: { active: false },
+    drain: { requested: false },
+  },
+  health: { state: "healthy", telemetry: { writable: true, lastError: null, lastErrorAt: null } },
+  journal: {
+    earliestSequence: null,
+    latestSequence: null,
+    retainedSegments: 0,
+    quarantinedTailCount: 0,
+  },
+  links: { repository: "https://github.com/acme/widget" },
+};
 
 let configDir: string;
 let dataBase: string;
@@ -156,6 +195,33 @@ describe("listTenants", () => {
 
   test("empty when there is no repos/ dir", () => {
     expect(listTenants({ configDir, dataBase })).toEqual([]);
+  });
+
+  test("surfaces the status-v2 queue lookahead when present", () => {
+    addRepo({ configDir, slug: "acme/widget" });
+    const stateDir = join(dataBase, "acme", "widget", "state");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      join(stateDir, STATUS_SNAPSHOT_FILE),
+      JSON.stringify({
+        ...MINIMAL_STATUS_V2,
+        queue: [
+          { issueNumber: 100, blockedBy: [], workable: true },
+          { issueNumber: 103, blockedBy: [100, 101], workable: false },
+        ],
+      }),
+    );
+    const [widget] = listTenants({ configDir, dataBase });
+    expect(widget?.queue).toEqual([
+      { issueNumber: 100, blockedBy: [], workable: true },
+      { issueNumber: 103, blockedBy: [100, 101], workable: false },
+    ]);
+  });
+
+  test("defaults to an empty queue when no status-v2 snapshot exists yet", () => {
+    addRepo({ configDir, slug: "acme/widget" });
+    const [widget] = listTenants({ configDir, dataBase });
+    expect(widget?.queue).toEqual([]);
   });
 });
 

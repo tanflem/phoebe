@@ -3,7 +3,7 @@
 Phoebe owns two local, versioned interfaces in `paths.stateDir`:
 
 ```text
-status-v1.json
+status-v2.json
 runtime-id
 events-v1/
   events-00000000000000000001-00000000000000000100.jsonl
@@ -17,12 +17,19 @@ happen locally; no optional observer delivery is in the work loop.
 
 ## Snapshot
 
-`status-v1.json` is replaced with a temporary-file rename, so a reader sees the
+`status-v2.json` is replaced with a temporary-file rename, so a reader sees the
 previous complete projection or the next complete projection. It carries the
 runtime and repository identity, engine/bootstrap/config/policy/prompt/provider
-digests, capabilities, lifecycle and active work, last success/failure, retry,
-backoff, quarantine and drain controls, telemetry health, journal bounds, and
-authoritative GitHub links.
+digests, capabilities, lifecycle and active work, the resolved `queue`
+lookahead, last success/failure, retry, backoff, quarantine and drain controls,
+telemetry health, journal bounds, and authoritative GitHub links.
+
+`queue` is every eligible `issues`-kind ticket in the order Phoebe would take
+it, each with its fully resolved `blockedBy` set (body + native blockers merged
+per `config.blockerSource`, not just the first one) and whether it is
+`workable` this cycle — the same gate `resolveWorktreeBase` applies before
+picking a unit. It answers "what comes after `activeWork`" without re-deriving
+the dependency graph against GitHub.
 
 The runtime ID is generated once in `runtime-id` and survives process and
 container restarts. `PHOEBE_RUNTIME_ID` can supply it on the first start; a later
@@ -66,7 +73,8 @@ Schemas and compatibility fixtures ship in [`contracts/`](../contracts/).
 Consumers must ignore additive fields and reject unsupported major versions.
 The fixture corpus covers idle, running, success, verification failure, agent
 failure, quota/backoff, graceful drain, crash-loop fallback, a corrupt tail, a
-missing range, and an unsupported major.
+missing range, an unsupported major, an empty queue, a linear blocker chain,
+and a diamond (one issue with two blockers).
 
 The interfaces exclude secrets, prompt bodies, source code, and agent logs.
 Failure and resource summaries are redacted and bounded. Digests are SHA-256

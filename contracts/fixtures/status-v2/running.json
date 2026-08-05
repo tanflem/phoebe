@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "status-v1",
+  "schemaVersion": "status-v2",
   "updatedAt": "2026-07-30T12:00:05.000Z",
   "runtime": {
     "runtimeId": "runtime-1",
@@ -19,7 +19,7 @@
     "prompts": "sha256:prompts",
     "providerModel": "sha256:provider-model"
   },
-  "capabilities": ["status-v1", "events-v1", "events-replay-v1", "events-range-v1"],
+  "capabilities": ["status-v2", "events-v1", "events-replay-v1", "events-range-v1"],
   "lifecycle": { "state": "running" },
   "activeWork": {
     "workId": "issues:42",
@@ -28,6 +28,11 @@
     "branch": "phoebe/issue-42",
     "startedAt": "2026-07-30T12:00:05.000Z"
   },
+  "queue": [
+    { "issueNumber": 42, "blockedBy": [], "workable": true },
+    { "issueNumber": 47, "blockedBy": [], "workable": true },
+    { "issueNumber": 50, "blockedBy": [47], "workable": false }
+  ],
   "lastSuccess": null,
   "lastFailure": null,
   "control": {

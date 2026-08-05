@@ -214,6 +214,31 @@ export function selectIssue(
   return null;
 }
 
+/**
+ * The full `issues` work order, ordered as {@link selectIssue} would take it,
+ * with each entry's resolved blocker set and whether it is workable this
+ * cycle — the status-v2 `queue` lookahead. Unlike `selectIssue`, which stops at
+ * the first workable candidate, this walks every eligible issue so an operator
+ * can see what comes after `activeWork`, not just what runs next.
+ */
+export function buildIssueQueue(
+  issues: readonly Issue[],
+  blockerStates: ReadonlyMap<number, BlockerPrState>,
+  phoebeBase?: string,
+  nativeBlockersByIssue: NativeBlockerMap = new Map(),
+): Array<{ issueNumber: number; blockedBy: readonly number[]; workable: boolean }> {
+  const eligible = issues.filter((issue) => !issue.labels.includes(PHOEBE_QUARANTINE_LABEL));
+  const sorted = [...eligible].sort(compareIssues);
+  return sorted.map((issue) => {
+    const nativeBlockers = nativeBlockersByIssue.get(issue.number) ?? [];
+    return {
+      issueNumber: issue.number,
+      blockedBy: issueBlockers(issue, nativeBlockers),
+      workable: resolveWorktreeBase(issue, blockerStates, phoebeBase, nativeBlockers) !== null,
+    };
+  });
+}
+
 export function stackedPrComment(blockerIssueNumber: number, blockerPrNumber: PrNumber): string {
   return (
     `⛓️ Blocked by #${blockerIssueNumber} (PR #${blockerPrNumber}). ` +

@@ -110,6 +110,7 @@ import {
   stackedCatchUpRetractionComment,
   stackRetargetedComment,
   RUN_ONCE_NOTHING_MESSAGE,
+  buildIssueQueue,
   selectFirstWorkUnit,
   selectIssue,
   summarizeChecksSelection,
@@ -2288,6 +2289,17 @@ async function runLoop({
     status.record({ kind: "selecting" });
     const fetchKinds = runOnce ? oneShotWorkKinds(workOrder) : workOrder;
     const data = await fetchCycleWorkData(fetchKinds);
+    // #20: publish the resolved `issues` lookahead — every eligible issue in
+    // selection order with its full blocker set, not just the one `selectIssue`
+    // is about to pick — so an observer can see what comes after `activeWork`.
+    status.setQueue(
+      buildIssueQueue(
+        data.issues,
+        data.blockerStates,
+        process.env["PHOEBE_BASE"],
+        data.nativeBlockersByIssue,
+      ),
+    );
     const picked = selectFirstWorkUnit(
       workOrder,
       {

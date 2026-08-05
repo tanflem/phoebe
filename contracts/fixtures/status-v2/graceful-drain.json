@@ -1,6 +1,6 @@
 {
-  "schemaVersion": "status-v1",
-  "updatedAt": "2026-07-30T12:02:00.000Z",
+  "schemaVersion": "status-v2",
+  "updatedAt": "2026-07-30T12:03:00.000Z",
   "runtime": {
     "runtimeId": "runtime-1",
     "instanceId": "instance-1",
@@ -19,27 +19,23 @@
     "prompts": "sha256:prompts",
     "providerModel": "sha256:provider-model"
   },
-  "capabilities": ["status-v1", "events-v1", "events-replay-v1", "events-range-v1"],
-  "lifecycle": { "state": "idle", "reason": "Provider quota exceeded." },
-  "activeWork": null,
-  "lastSuccess": null,
-  "lastFailure": {
-    "eventId": "event-5",
-    "sequence": 5,
-    "workId": "issues:42",
-    "outcome": "quota-backoff",
-    "endedAt": "2026-07-30T12:01:00.000Z",
-    "failureCategory": "quota"
+  "capabilities": ["status-v2", "events-v1", "events-replay-v1", "events-range-v1"],
+  "lifecycle": { "state": "draining", "reason": "Finishing the in-flight work unit." },
+  "activeWork": {
+    "workId": "reviews:9",
+    "kind": "reviews",
+    "pullRequestNumber": 9,
+    "branch": "phoebe/issue-42",
+    "startedAt": "2026-07-30T12:00:05.000Z"
   },
+  "queue": [],
+  "lastSuccess": null,
+  "lastFailure": null,
   "control": {
-    "retry": { "attempt": 1, "nextAt": "2026-07-30T12:07:00.000Z" },
-    "backoff": {
-      "active": true,
-      "until": "2026-07-30T12:07:00.000Z",
-      "reason": "Provider quota exceeded."
-    },
+    "retry": { "attempt": 0 },
+    "backoff": { "active": false },
     "quarantine": { "active": false },
-    "drain": { "requested": false }
+    "drain": { "requested": true, "requestedAt": "2026-07-30T12:03:00.000Z" }
   },
   "health": {
     "state": "healthy",
@@ -47,12 +43,12 @@
   },
   "journal": {
     "earliestSequence": 1,
-    "latestSequence": 5,
+    "latestSequence": 4,
     "retainedSegments": 1,
     "quarantinedTailCount": 0
   },
   "links": {
     "repository": "https://github.com/owner/repo",
-    "issue": "https://github.com/owner/repo/issues/42"
+    "pullRequest": "https://github.com/owner/repo/pull/9"
   }
 }

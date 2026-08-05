@@ -11,7 +11,7 @@ const root = join(import.meta.dirname, "..");
 const fixtureRoot = join(root, "contracts", "fixtures");
 const tempDirs: string[] = [];
 const ajv = addFormats(new Ajv2020({ allErrors: true, strict: true }));
-const validateStatus = ajv.compile(json("contracts/status-v1.schema.json") as object);
+const validateStatus = ajv.compile(json("contracts/status-v2.schema.json") as object);
 const validateEvent = ajv.compile(json("contracts/events-v1.schema.json") as object);
 
 function json(path: string): unknown {
@@ -35,14 +35,40 @@ afterEach(() => {
 });
 
 describe("published compatibility fixtures", () => {
-  test.each(["idle", "running", "quota-backoff", "graceful-drain", "crash-loop-fallback"])(
-    "status-v1/%s.json conforms to the runtime reader",
-    (name) => {
-      const fixture = json(`contracts/fixtures/status-v1/${name}.json`);
-      expect(validateStatus(fixture), JSON.stringify(validateStatus.errors)).toBe(true);
-      expect(() => parseStatusSnapshot(fixture)).not.toThrow();
-    },
-  );
+  test.each([
+    "idle",
+    "running",
+    "quota-backoff",
+    "graceful-drain",
+    "crash-loop-fallback",
+    "queue-linear-chain",
+    "queue-diamond",
+  ])("status-v2/%s.json conforms to the runtime reader", (name) => {
+    const fixture = json(`contracts/fixtures/status-v2/${name}.json`);
+    expect(validateStatus(fixture), JSON.stringify(validateStatus.errors)).toBe(true);
+    expect(() => parseStatusSnapshot(fixture)).not.toThrow();
+  });
+
+  test("idle.json carries an empty queue", () => {
+    const fixture = json("contracts/fixtures/status-v2/idle.json") as { queue: unknown[] };
+    expect(fixture.queue).toEqual([]);
+  });
+
+  test("queue-linear-chain.json orders a chain with single-blocker sets", () => {
+    const fixture = json("contracts/fixtures/status-v2/queue-linear-chain.json") as {
+      queue: Array<{ issueNumber: number; blockedBy: readonly number[] }>;
+    };
+    expect(fixture.queue.map((entry) => entry.issueNumber)).toEqual([100, 101, 102]);
+    expect(fixture.queue.map((entry) => entry.blockedBy)).toEqual([[], [100], [101]]);
+  });
+
+  test("queue-diamond.json resolves both blockers on the converging issue", () => {
+    const fixture = json("contracts/fixtures/status-v2/queue-diamond.json") as {
+      queue: Array<{ issueNumber: number; blockedBy: readonly number[] }>;
+    };
+    const diamond = fixture.queue.find((entry) => entry.issueNumber === 103);
+    expect(diamond?.blockedBy).toEqual([101, 102]);
+  });
 
   test.each(["success", "verification-failure", "agent-failure"])(
     "events-v1/%s.json conforms to the runtime reader",
@@ -73,10 +99,10 @@ describe("published compatibility fixtures", () => {
   });
 
   test("schemas identify the published interfaces and permit additive fields", () => {
-    const status = json("contracts/status-v1.schema.json") as Record<string, unknown>;
+    const status = json("contracts/status-v2.schema.json") as Record<string, unknown>;
     const events = json("contracts/events-v1.schema.json") as Record<string, unknown>;
     expect(status).toMatchObject({
-      $id: "https://phoebe.dev/contracts/status-v1.schema.json",
+      $id: "https://phoebe.dev/contracts/status-v2.schema.json",
       additionalProperties: true,
     });
     expect(events).toMatchObject({

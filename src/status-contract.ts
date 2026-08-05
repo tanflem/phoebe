@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const STATUS_SCHEMA_VERSION = "status-v1" as const;
+export const STATUS_SCHEMA_VERSION = "status-v2" as const;
 export const EVENTS_SCHEMA_VERSION = "events-v1" as const;
 
 export type DigestSet = {
@@ -29,6 +29,20 @@ export type WorkIdentity = {
   pullRequestNumber?: number;
   branch?: string;
   startedAt: string;
+};
+
+/**
+ * One issue in the resolved work-order lookahead, ordered as Phoebe would take
+ * it. `blockedBy` is the full resolved blocker set (body + native, per
+ * `config.blockerSource`) — not just the first blocker — so a consumer can
+ * render issue chains by number without re-querying GitHub. `workable`
+ * mirrors `resolveWorktreeBase` returning non-null: every blocker has at least
+ * an open PR (or none at all).
+ */
+export type QueueEntry = {
+  issueNumber: number;
+  blockedBy: readonly number[];
+  workable: boolean;
 };
 
 export type OutcomeSummary = {
@@ -66,6 +80,7 @@ export type StatusSnapshot = {
     reason?: string;
   };
   activeWork: WorkIdentity | null;
+  queue: readonly QueueEntry[];
   lastSuccess: OutcomeSummary | null;
   lastFailure: OutcomeSummary | null;
   control: {
@@ -250,7 +265,17 @@ function isOutcomeSummary(value: unknown): value is OutcomeSummary {
   );
 }
 
-function isStatusV1(value: unknown): value is StatusSnapshot {
+function isQueueEntry(value: unknown): value is QueueEntry {
+  if (!isRecord(value)) return false;
+  return (
+    isPositiveInteger(value["issueNumber"]) &&
+    Array.isArray(value["blockedBy"]) &&
+    value["blockedBy"].every((blocker) => isPositiveInteger(blocker)) &&
+    typeof value["workable"] === "boolean"
+  );
+}
+
+function isStatusV2(value: unknown): value is StatusSnapshot {
   if (!isRecord(value) || value["schemaVersion"] !== STATUS_SCHEMA_VERSION) return false;
   const runtime = value["runtime"];
   const repository = value["repository"];
@@ -293,6 +318,8 @@ function isStatusV1(value: unknown): value is StatusSnapshot {
     isOneOf(lifecycle["state"], LIFECYCLE_STATES) &&
     isOptionalString(lifecycle, "reason") &&
     (value["activeWork"] === null || isWorkIdentity(value["activeWork"])) &&
+    Array.isArray(value["queue"]) &&
+    value["queue"].every((entry) => isQueueEntry(entry)) &&
     (value["lastSuccess"] === null || isOutcomeSummary(value["lastSuccess"])) &&
     (value["lastFailure"] === null || isOutcomeSummary(value["lastFailure"])) &&
     isRecord(retry) &&
@@ -333,8 +360,8 @@ export function parseStatusSnapshot(value: unknown): StatusSnapshot {
       throw new ContractCapabilityError(STATUS_SCHEMA_VERSION, value["schemaVersion"]);
     }
   }
-  if (!isStatusV1(value)) {
-    throw new Error("Received an invalid status-v1 snapshot.");
+  if (!isStatusV2(value)) {
+    throw new Error(`Received an invalid ${STATUS_SCHEMA_VERSION} snapshot.`);
   }
   return value;
 }

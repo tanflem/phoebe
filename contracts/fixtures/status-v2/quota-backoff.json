@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "status-v2",
+  "updatedAt": "2026-07-30T12:02:00.000Z",
+  "runtime": {
+    "runtimeId": "runtime-1",
+    "instanceId": "instance-1",
+    "startedAt": "2026-07-30T11:00:00.000Z"
+  },
+  "repository": {
+    "slug": "owner/repo",
+    "url": "https://github.com/owner/repo",
+    "defaultBranch": "main"
+  },
+  "digests": {
+    "engine": "sha256:engine",
+    "bootstrap": "sha256:bootstrap",
+    "config": "sha256:config",
+    "policy": "sha256:policy",
+    "prompts": "sha256:prompts",
+    "providerModel": "sha256:provider-model"
+  },
+  "capabilities": ["status-v2", "events-v1", "events-replay-v1", "events-range-v1"],
+  "lifecycle": { "state": "idle", "reason": "Provider quota exceeded." },
+  "activeWork": null,
+  "queue": [{ "issueNumber": 42, "blockedBy": [], "workable": true }],
+  "lastSuccess": null,
+  "lastFailure": {
+    "eventId": "event-5",
+    "sequence": 5,
+    "workId": "issues:42",
+    "outcome": "quota-backoff",
+    "endedAt": "2026-07-30T12:01:00.000Z",
+    "failureCategory": "quota"
+  },
+  "control": {
+    "retry": { "attempt": 1, "nextAt": "2026-07-30T12:07:00.000Z" },
+    "backoff": {
+      "active": true,
+      "until": "2026-07-30T12:07:00.000Z",
+      "reason": "Provider quota exceeded."
+    },
+    "quarantine": { "active": false },
+    "drain": { "requested": false }
+  },
+  "health": {
+    "state": "healthy",
+    "telemetry": { "writable": true, "lastError": null, "lastErrorAt": null }
+  },
+  "journal": {
+    "earliestSequence": 1,
+    "latestSequence": 5,
+    "retainedSegments": 1,
+    "quarantinedTailCount": 0
+  },
+  "links": {
+    "repository": "https://github.com/owner/repo",
+    "issue": "https://github.com/owner/repo/issues/42"
+  }
+}

@@ -36,6 +36,7 @@ import {
   parseReviewsHandledWatermark,
   parseIssueNumberFromBranch,
   resolveWorktreeBase,
+  buildIssueQueue,
   resolveStackedPrPlan,
   getMergedBlockerPrNumbers,
   ghStackExtensionInstallArgs,
@@ -460,6 +461,52 @@ describe("selectIssue", () => {
     expect(picked?.resolution.stacked).toBe(true);
     expect(picked?.resolution.blockerIssueNumber).toBe(98);
     setResolvedConfig(resolveConfig(sampleUserConfig));
+  });
+});
+
+describe("buildIssueQueue (#20)", () => {
+  test("returns an empty queue when there are no eligible issues", () => {
+    expect(buildIssueQueue([], new Map())).toEqual([]);
+  });
+
+  test("orders a linear chain and reports the full resolved blocker set", () => {
+    const issues = [
+      issue({ number: 101, title: "Add toggle", body: "Blocked by #100" }),
+      issue({ number: 100, title: "Fix crash on startup" }),
+    ];
+    const states = new Map<number, BlockerPrState>([
+      [100, { hasOpenPr: true, openPrNumber: asPrNumber(200), hasMergedPr: false }],
+    ]);
+    expect(buildIssueQueue(issues, states)).toEqual([
+      { issueNumber: 100, blockedBy: [], workable: true },
+      { issueNumber: 101, blockedBy: [100], workable: true },
+    ]);
+  });
+
+  test("marks an issue not workable when a blocker has no PR yet", () => {
+    const issues = [issue({ number: 101, body: "Blocked by #100" })];
+    const states = new Map<number, BlockerPrState>([
+      [100, { hasOpenPr: false, hasMergedPr: false }],
+    ]);
+    expect(buildIssueQueue(issues, states)).toEqual([
+      { issueNumber: 101, blockedBy: [100], workable: false },
+    ]);
+  });
+
+  test("reports both blockers on a diamond issue, workable once each has a PR", () => {
+    const issues = [issue({ number: 103, body: "Blocked by #101\nBlocked by #102" })];
+    const states = new Map<number, BlockerPrState>([
+      [101, { hasOpenPr: true, openPrNumber: asPrNumber(201), hasMergedPr: false }],
+      [102, { hasOpenPr: true, openPrNumber: asPrNumber(202), hasMergedPr: false }],
+    ]);
+    expect(buildIssueQueue(issues, states)).toEqual([
+      { issueNumber: 103, blockedBy: [101, 102], workable: true },
+    ]);
+  });
+
+  test("excludes quarantined issues", () => {
+    const issues = [issue({ number: 104, labels: ["phoebe:quarantined"] })];
+    expect(buildIssueQueue(issues, new Map())).toEqual([]);
   });
 });
 
