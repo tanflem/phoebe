@@ -29,7 +29,7 @@ import {
   type Sha,
 } from "./branded.ts";
 import { buildAgentEnv } from "./agent-env.ts";
-import { installDrainSignal, type DrainSignal } from "./drain.ts";
+import { installDrainSignal, REF_CHANGE_DRAIN_SIGNAL, type DrainSignal } from "./drain.ts";
 import { BrokerDisconnectedError, createSlotClient, type SlotClient } from "./slot-client.ts";
 import { RunTimeoutError, resolveRunTimeoutMs, runWithDeadline } from "./run-timeout.ts";
 import {
@@ -2179,7 +2179,7 @@ export async function runEngine(argv: readonly string[] = process.argv.slice(2))
     statusPath: join(config.paths.stateDir, STATUS_FILE),
   });
 
-  const drain = installDrainSignal();
+  const drain = installDrainSignal(process, ["SIGTERM", REF_CHANGE_DRAIN_SIGNAL]);
   let failed = false;
   try {
     await runLoop({ runOnce, dryRun, pollIntervalMs, drain, status, slotClient, emitUnitEvent });
@@ -2191,6 +2191,18 @@ export async function runEngine(argv: readonly string[] = process.argv.slice(2))
     if (!failed) status.record({ kind: "stopped" });
     drain.dispose();
   }
+}
+
+/**
+ * The `lifecycle.reason` prefix for a "draining" transition — distinguishes a
+ * ref-change drain (`phoebe boot`'s reconcile watch, REF_CHANGE_DRAIN_SIGNAL)
+ * from a plain container stop (SIGTERM), so an operator reading the status
+ * snapshot can tell "about to relaunch on the new commit" from "shutting
+ * down" (#23).
+ */
+function drainReason(drain: DrainSignal, detail: string): string {
+  const cause = drain.signal === REF_CHANGE_DRAIN_SIGNAL ? "Engine ref changed" : "Drain requested";
+  return `${cause} — ${detail}`;
 }
 
 async function runLoop({
@@ -2215,7 +2227,7 @@ async function runLoop({
       console.log("[phoebe] Drain requested — starting no new work unit; exiting 0.");
       status.record({
         kind: "draining",
-        reason: "Drain requested — starting no new work unit.",
+        reason: drainReason(drain, "starting no new work unit."),
       });
       break;
     }
@@ -2270,7 +2282,7 @@ async function runLoop({
       console.log("[phoebe] Drain requested before starting the next unit — exiting 0.");
       status.record({
         kind: "draining",
-        reason: "Drain requested before starting the next unit.",
+        reason: drainReason(drain, "starting no new work unit."),
       });
       break;
     }
@@ -2389,7 +2401,7 @@ async function runLoop({
       console.log("[phoebe] Finished the in-flight unit under drain — exiting 0.");
       status.record({
         kind: "draining",
-        reason: "Finished the in-flight unit under drain.",
+        reason: drainReason(drain, "the in-flight unit finished."),
       });
       break;
     }

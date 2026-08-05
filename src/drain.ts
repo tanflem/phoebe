@@ -19,9 +19,25 @@
 // watch instead of waiting out a poll interval — and so boot survives the moment
 // between draining one engine and spawning its replacement.
 
+/**
+ * The signal `phoebe boot`'s reconcile watch sends when the *tracked engine
+ * ref* moved (bootstrap/reconcile.ts), as opposed to a plain container
+ * SIGTERM/SIGINT. Distinct so the drained engine can tell the two apart and
+ * report *why* it is draining on its status snapshot (`lifecycle.reason`,
+ * #23) — "the ref moved, reload onto it" reads very differently to an
+ * operator than "the container is stopping".
+ */
+export const REF_CHANGE_DRAIN_SIGNAL: NodeJS.Signals = "SIGUSR2";
+
 export interface DrainSignal {
   /** True once a drain has been requested; never flips back. */
   readonly requested: boolean;
+  /**
+   * The signal that triggered the drain, or null before one arrives. Latched
+   * to the *first* signal received, same as `requested` — a drain reason
+   * does not change once set.
+   */
+  readonly signal: NodeJS.Signals | null;
   /**
    * Resolve after `ms`, or immediately once a drain is requested — whichever
    * comes first. A drain arriving mid-wait wakes it so the loop stops promptly
@@ -38,19 +54,28 @@ export function installDrainSignal(
   signals: readonly NodeJS.Signals[] = ["SIGTERM"],
 ): DrainSignal {
   let requested = false;
+  let signal: NodeJS.Signals | null = null;
   // Resolver for an in-flight wait(), so a drain can wake it early. Cleared once
   // it fires (or the wait times out) so we never resolve a stale promise.
   let wake: (() => void) | undefined;
 
-  const onSignal = () => {
+  const onSignal = (received: NodeJS.Signals) => {
+    if (!requested) signal = received;
     requested = true;
     wake?.();
   };
-  for (const signal of signals) emitter.on(signal, onSignal);
+  // One bound handler per signal (captured in the closure) so `dispose` can
+  // `off` the exact function it `on`'d — an anonymous handler per signal
+  // cannot be removed later.
+  const handlers = new Map(signals.map((configured) => [configured, () => onSignal(configured)]));
+  for (const [configured, handler] of handlers) emitter.on(configured, handler);
 
   return {
     get requested() {
       return requested;
+    },
+    get signal() {
+      return signal;
     },
     wait(ms: number): Promise<void> {
       if (requested) return Promise.resolve();
@@ -67,7 +92,7 @@ export function installDrainSignal(
       });
     },
     dispose() {
-      for (const signal of signals) emitter.off(signal, onSignal);
+      for (const [configured, handler] of handlers) emitter.off(configured, handler);
       wake?.();
     },
   };
