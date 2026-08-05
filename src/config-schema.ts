@@ -117,6 +117,19 @@ export type IssueSourceConfig = {
   readyLabel?: string;
 };
 
+/**
+ * Bootstrapper-only workspace discovery knobs (#83/#97). Presence of this
+ * block on the deployment-root config selects workspace mode; `depth` is how
+ * many directory levels under the root the bootstrapper scans for tenant
+ * configs (integer ≥ 1, default 1). The engine never reads this: it lives on
+ * `PhoebeUserConfig` so a consumer config that sets it still type-checks, and
+ * `resolveConfig` deliberately drops it — it never reaches `PhoebeConfig`.
+ */
+export type WorkspaceField = {
+  /** Scan depth under the workspace root; omit ⇒ 1. */
+  depth?: number;
+};
+
 export type PromptFilesConfig = {
   issue: string;
   conflict: string;
@@ -267,6 +280,14 @@ export type PhoebeUserConfig = {
   /** Bootstrapper-only engine source (see {@link EngineSourceField}). The
    *  engine ignores it; `resolveConfig` drops it. Omitted ⇒ github/main. */
   engine?: EngineSourceField;
+  /**
+   * Bootstrapper-only workspace discovery (see {@link WorkspaceField}).
+   * Presence of this block selects workspace discovery mode (#83/#91); `depth`
+   * is how many directory levels under the root to scan for child configs
+   * (default 1 when omitted). The engine never reads it; `resolveConfig` drops
+   * it the same way it drops `engine`.
+   */
+  workspace?: WorkspaceField;
   defaultBranch?: string;
   branchPrefix?: string;
   readyLabel?: string;
@@ -458,6 +479,33 @@ export function validateUserConfig(user: PhoebeUserConfig): void {
     if (readyLabel !== undefined && typeof readyLabel !== "string") {
       throw new Error(`phoebe.config.ts issueSource.readyLabel must be a string.`);
     }
+  }
+  if (user.workspace !== undefined) {
+    validateWorkspaceField(user.workspace);
+  }
+}
+
+/**
+ * Reject a malformed bootstrapper-only `workspace` block. Presence is enough
+ * to select workspace mode later; `depth` must be an integer ≥ 1 when set, and
+ * omitted `depth` is fine (bootstrap defaults it to 1). Kept on the schema so
+ * a mistyped consumer config fails at `resolveConfig` the same way a bad
+ * `blockedByPattern` does — before any engine work unit runs.
+ */
+function validateWorkspaceField(field: WorkspaceField): void {
+  if (field === null || typeof field !== "object" || Array.isArray(field)) {
+    throw new Error(
+      `phoebe.config.ts \`workspace\` must be { depth?: integer ≥ 1 } ` +
+        `(got ${JSON.stringify(field)}).`,
+    );
+  }
+  if (field.depth === undefined) return;
+  const { depth } = field;
+  if (typeof depth !== "number" || !Number.isInteger(depth) || depth < 1) {
+    throw new Error(
+      `phoebe.config.ts \`workspace.depth\` must be an integer ≥ 1 ` +
+        `(got ${JSON.stringify(depth)}).`,
+    );
   }
 }
 

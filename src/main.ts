@@ -46,6 +46,17 @@ import {
   type EmitUnitEvent,
   type UnitRef,
 } from "./unit-event.ts";
+import {
+  buildQuarantineComment,
+  buildUnitAttemptMarker,
+  buildUnitTimeoutMarker,
+  decideTimeoutRecord,
+  findLatestUnitAttemptComment,
+  PHOEBE_QUARANTINE_LABEL,
+  planUnitAttempt,
+  resolveMaxUnitAttempts,
+  resolveMaxUnitTimeouts,
+} from "./quarantine.ts";
 import { join } from "node:path";
 import {
   EXECUTION_REFUSED_MESSAGE,
@@ -140,14 +151,6 @@ import {
   type WorkKindName,
   type WorkUnit,
 } from "./orchestrator.ts";
-import {
-  buildQuarantineComment,
-  buildUnitAttemptMarker,
-  findLatestUnitAttemptComment,
-  PHOEBE_QUARANTINE_LABEL,
-  planUnitAttempt,
-  resolveMaxUnitAttempts,
-} from "./quarantine.ts";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000;
 // Whole-unit wall-clock budget (#72): the agent phase — the async, hang-prone
@@ -554,6 +557,133 @@ type OpenPhoebePr = {
   baseRefName: BranchRef;
   authorLogin: string;
 };
+
+// --- Poison-unit quarantine write path (#75) ---------------------------------
+// The read/skip half ships in orchestrator.ts (it filters `phoebe:quarantined`
+// out of selection). This is the missing write half: on a whole-unit timeout,
+// count consecutive timeouts on the unit itself (a GitHub marker) and, at K,
+// apply the label + escalation comment so the poisonous unit stops being
+// re-picked. Kept thin over `gh`; the count/threshold policy is pure in
+// quarantine.ts (`decideTimeoutRecord`).
+
+type TimeoutComment = { body: string; createdAt: string; authorLogin: string };
+
+type UnitTimeoutInputs = {
+  /** Comments (body + createdAt + authorLogin), oldest-first — fed to `decideTimeoutRecord`. */
+  comments: TimeoutComment[];
+  /** Extra external-activity instant (a PR head push), or null — a further reset signal. */
+  extraActivityAt: string | null;
+  /** Recorded in the escalation comment for the future auto-un-stick sweep. */
+  baseline: string;
+};
+
+type GhTimeoutComment = { body: string; createdAt: string; author: { login: string } | null };
+
+function toTimeoutComments(comments: readonly GhTimeoutComment[]): TimeoutComment[] {
+  // `author` is null for a deleted account; coerce to "" (a foreign author, never
+  // Phoebe) rather than letting the deref throw and skip the whole timeout record.
+  return comments.map((c) => ({
+    body: c.body,
+    createdAt: c.createdAt,
+    authorLogin: c.author?.login ?? "",
+  }));
+}
+
+function fetchIssueTimeoutInputs(issueNumber: number): UnitTimeoutInputs {
+  const raw = ghJson<{ updatedAt: string; comments: GhTimeoutComment[] }>([
+    "issue",
+    "view",
+    String(issueNumber),
+    "--json",
+    "comments,updatedAt",
+  ]);
+  // Issues have no commits and `gh` does not expose body-edit times, so a new
+  // human comment is the only reset signal; `updatedAt` is the un-stick baseline.
+  return {
+    comments: toTimeoutComments(raw.comments),
+    extraActivityAt: null,
+    baseline: raw.updatedAt,
+  };
+}
+
+function fetchPrTimeoutInputs(prNumber: PrNumber): UnitTimeoutInputs {
+  const raw = ghJson<{
+    headRefOid: string;
+    comments: GhTimeoutComment[];
+    commits: Array<{ committedDate: string }>;
+  }>(["pr", "view", String(prNumber), "--json", "comments,commits,headRefOid"]);
+  // A new push (head commit) or human comment resets; head SHA is the baseline.
+  const headCommitAt =
+    raw.commits.length > 0 ? raw.commits[raw.commits.length - 1]!.committedDate : null;
+  return {
+    comments: toTimeoutComments(raw.comments),
+    extraActivityAt: headCommitAt,
+    baseline: raw.headRefOid,
+  };
+}
+
+function postUnitComment(isIssueKind: boolean, id: string, body: string): void {
+  gh([isIssueKind ? "issue" : "pr", "comment", id, "--body", body]);
+}
+
+function addQuarantineLabel(isIssueKind: boolean, id: string): void {
+  gh([isIssueKind ? "issue" : "pr", "edit", id, "--add-label", PHOEBE_QUARANTINE_LABEL]);
+}
+
+/**
+ * Record one whole-unit timeout toward the poison-unit quarantine (#75): read the
+ * latest timeout marker on the unit, post the incremented count, and at K apply
+ * `phoebe:quarantined` + the escalation comment so selection starts skipping it.
+ * Best-effort — a GitHub write failure here is logged and swallowed so it can
+ * never take the daemon down (the timeout itself is already recorded).
+ */
+function recordUnitTimeout(picked: WorkUnit, phoebeLogin: string, emit: EmitUnitEvent): void {
+  const ref = unitRef(picked);
+  const isIssueKind = picked.kind === "issues" || picked.kind === "research";
+  try {
+    // `data.phoebeLogin` is only populated when the `reviews` kind was fetched
+    // this cycle, but any kind can time out — resolve it directly when absent so
+    // Phoebe's own timeout markers are never mistaken for reset-triggering
+    // foreign activity (which would reset the count every rotation and never
+    // quarantine). Timeouts are rare, so the extra `gh api user` is cheap.
+    const login = phoebeLogin || phoebeGhLogin();
+    const k = resolveMaxUnitTimeouts(process.env, config.maxUnitTimeouts);
+    const inputs = isIssueKind
+      ? fetchIssueTimeoutInputs(Number(ref.id))
+      : fetchPrTimeoutInputs(asPrNumber(Number(ref.id)));
+    const { count, quarantine } = decideTimeoutRecord({
+      comments: inputs.comments,
+      phoebeLogin: login,
+      extraActivityAt: inputs.extraActivityAt,
+      k,
+    });
+    postUnitComment(isIssueKind, ref.id, buildUnitTimeoutMarker(count));
+    if (quarantine) {
+      addQuarantineLabel(isIssueKind, ref.id);
+      postUnitComment(
+        isIssueKind,
+        ref.id,
+        buildQuarantineComment({
+          kind: ref.kind,
+          id: Number(ref.id),
+          k: count,
+          baseline: inputs.baseline,
+          reason: "timed out",
+        }),
+      );
+      emit({
+        unit: ref,
+        event: "quarantined",
+        detail: `timed out ${count}× — labelled ${PHOEBE_QUARANTINE_LABEL}`,
+      });
+    }
+  } catch (error) {
+    console.error(
+      `[phoebe] Could not record timeout toward quarantine for ${ref.kind} #${ref.id} — ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
 
 function listOpenPhoebePrs(): OpenPhoebePr[] {
   type GhOpenPr = {
@@ -2649,6 +2779,9 @@ async function runLoop({
           event: "timed-out",
           detail: `${Math.round(error.elapsedMs / 1000)}s budget exceeded`,
         });
+        // Count this timeout on the unit and, at K consecutive, quarantine it so
+        // a genuinely poisonous unit stops being re-picked forever (#75).
+        recordUnitTimeout(picked, data.phoebeLogin ?? "", emitUnitEvent);
       } else {
         // A non-timeout failure: clear the current unit and record the error so
         // `phoebe list` shows it (the durable record is still the per-work-kind

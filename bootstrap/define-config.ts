@@ -8,10 +8,11 @@
 //
 // It lives in the bootstrapper (the published package surface) rather than the
 // engine because the bootstrapper is what a consumer installs. The config shape
-// itself (`PhoebeUserConfig`, including the bootstrapper-only `engine` field) is
-// owned by the engine's config schema; this is only the typing helper. The
-// value is never read at runtime beyond being forwarded — the whole benefit is
-// editor autocomplete and a compile-time check that only known fields appear.
+// itself (`PhoebeUserConfig`, including the bootstrapper-only `engine` and
+// `workspace` fields) is owned by the engine's config schema; this is only the
+// typing helper. The value is never read at runtime beyond being forwarded —
+// the whole benefit is editor autocomplete and a compile-time check that only
+// known fields appear.
 
 import type { PhoebeUserConfig } from "../src/config-schema.ts";
 

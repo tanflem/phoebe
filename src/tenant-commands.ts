@@ -1,5 +1,5 @@
-// Multi-tenant lifecycle commands (#63) — the CLI surface for a deployment that
-// owns many repos rather than a single scaffold.
+// Multi-tenant lifecycle commands (#63/#95) — the CLI surface for a deployment
+// that owns many repos rather than a single scaffold.
 //
 // Host-side (operate on the bind-mounted config tree):
 //   - `add-repo <owner/repo>`  scaffold repos/<owner>/<repo>/ → transitions the
@@ -9,7 +9,8 @@
 //                              /data/repos/<slug> is retained, #62).
 // In-container (act on the data volume):
 //   - `list`   enumerate tenants + health (config valid? env present? engine
-//              state from status.json? retained /data?).
+//              state from status.json? retained /data?). Nested scans `repos/`;
+//              workspace mode reuses the #91 discover walk over child trees.
 //   - `purge <owner/repo> --yes`  destructive wipe of a *removed* tenant's
 //              retained /data/repos/<slug>; refuses while a live config exists.
 //
@@ -26,8 +27,15 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
-import { REPOS_DIR, TENANT_CONFIG_FILE, TENANT_ENV_FILE } from "../bootstrap/tenants.ts";
+import { join, relative } from "node:path";
+import {
+  discoverWorkspaceTenants,
+  REPOS_DIR,
+  TENANT_CONFIG_FILE,
+  TENANT_ENV_FILE,
+} from "../bootstrap/tenants.ts";
+import { readWorkspaceField } from "../bootstrap/workspace-source.ts";
+import { loadUserConfig } from "./load-config.ts";
 import { ContractCapabilityError, type QueueEntry } from "./status-contract.ts";
 import { readStatusSnapshot } from "./status-store.ts";
 import { readStatus, STATUS_FILE, type StatusSnapshot } from "./unit-event.ts";
@@ -71,10 +79,31 @@ export function defaultRepoUrl(slug: string): string {
 }
 
 /**
+ * Strip `user[:password]@` userinfo from an http(s) URL so a tokenised origin
+ * (e.g. `https://x-access-token:ghs_…@github.com/owner/repo.git`) never lands in
+ * a committed `phoebe.config.ts` or a printed init report. SSH scp-like remotes
+ * carry no secret and are returned unchanged; unparseable input is returned as-is.
+ */
+export function stripUrlCredentials(url: string): string {
+  if (!/^https?:\/\//i.test(url)) return url;
+  try {
+    const parsed = new URL(url);
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+/**
  * Render a per-tenant `phoebe.config.ts`. Type-only import (like the shipped
  * flat scaffold) so it loads from the container mount with no `node_modules`;
  * deliberately carries NO `engine` field — engine source is shared, set in the
  * deployment-root config (#60/#63).
+ *
+ * Used by `add-repo` (nested path tenants) and `init --tenant` (workspace
+ * child in-tree installs, #94).
  */
 export function renderTenantConfig(fields: {
   repoSlug: string;
@@ -83,10 +112,11 @@ export function renderTenantConfig(fields: {
   checkCommand: string;
   testCommand: string;
 }): string {
-  return `// Per-tenant Phoebe config — scaffolded by \`phoebe add-repo\`.
+  return `// Per-tenant Phoebe config — scaffolded by \`phoebe add-repo\` or \`phoebe init --tenant\`.
 //
 // One tenant of a multi-tenant deployment. The shared engine source and
 // fleet-global knobs live in the deployment-root phoebe.config.ts, not here.
+// The written repoSlug is authoritative for workspace discovery (#85).
 import type { PhoebeUserConfig } from "phoebe-agent";
 
 const config: PhoebeUserConfig = {
@@ -101,7 +131,8 @@ export default config;
 `;
 }
 
-const TENANT_ENV_EXAMPLE = `# Per-tenant secrets — copy to \`.env\`. Read ONLY by this tenant's engine child
+/** Per-tenant secrets template — copy to `.env`. Shared by add-repo + init --tenant. */
+export const TENANT_ENV_EXAMPLE = `# Per-tenant secrets — copy to \`.env\`. Read ONLY by this tenant's engine child
 # (the supervisor scrubs every other tenant's secrets, #61).
 
 # --- Required ---
@@ -112,6 +143,49 @@ CURSOR_API_KEY=
 ANTHROPIC_API_KEY=
 OPENAI_KEY=
 `;
+
+/**
+ * Placeholder when a child has no `origin` (or an unparseable one) at scaffold
+ * time — the operator fills real values before boot.
+ */
+export const TENANT_PLACEHOLDER_SLUG = "org/repo";
+export const TENANT_PLACEHOLDER_URL = defaultRepoUrl(TENANT_PLACEHOLDER_SLUG);
+
+/**
+ * Derive `owner/repo` from a git remote URL (HTTPS, SSH scp-like, or ssh://).
+ * Returns null when the URL does not yield a well-formed slug.
+ */
+export function slugFromRemoteUrl(url: string): string | null {
+  const raw = url.trim();
+  if (raw.length === 0) return null;
+
+  let path: string | undefined;
+  // scp-like `user@host:owner/repo` — any username, host without `:`/`/`.
+  const scp = /^[^@/\s]+@[^:/\s]+:(.+)$/.exec(raw);
+  if (scp) {
+    path = scp[1];
+  } else {
+    // https://host/owner/repo[.git], ssh://git@host/owner/repo, with optional userinfo
+    const m = /^(?:[a-zA-Z][a-zA-Z0-9+.-]*:\/\/)?(?:[^@/\s]+@)?[^/\s]+[/:](.+)$/.exec(raw);
+    path = m?.[1];
+  }
+  if (path === undefined) return null;
+
+  // Strip terminal slashes before the `.git` suffix so `…/repo.git/` → `repo`.
+  path = path.replace(/\/+$/, "").replace(/\.git$/i, "");
+  const parts = path.split("/").filter((p) => p.length > 0);
+  if (parts.length < 2) return null;
+
+  // Last two path segments → owner/repo (GitHub; also last-two for deeper hosts).
+  const owner = parts[parts.length - 2]!;
+  const repo = parts[parts.length - 1]!;
+  try {
+    parseSlug(`${owner}/${repo}`);
+    return `${owner}/${repo}`;
+  } catch {
+    return null;
+  }
+}
 
 export type AddRepoResult = { tenantDir: string; created: string[] };
 
@@ -212,9 +286,96 @@ function readTenantQueue(stateDir: string): readonly QueueEntry[] {
   }
 }
 
-/** Enumerate every nested tenant with its health signals for `phoebe list`. */
-export function listTenants(opts: { configDir: string; dataBase: string }): TenantListing[] {
-  const reposRoot = join(opts.configDir, REPOS_DIR);
+/** Health columns for one tenant dir keyed by its authoritative slug. */
+function listingFor(
+  slug: string,
+  dir: string,
+  dataBase: string,
+  configValid: boolean,
+): TenantListing {
+  const dataDir = join(dataBase, slug);
+  const stateDir = join(dataDir, "state");
+  return {
+    slug,
+    configValid,
+    envPresent: envPresent(dir),
+    retainedData: existsSync(dataDir),
+    status: readStatus(join(stateDir, STATUS_FILE)),
+    queue: readTenantQueue(stateDir),
+  };
+}
+
+/**
+ * Load a workspace child's authoritative `repoSlug` (same contract boot uses).
+ * Throws when the file will not load or the slug is missing — the discovery
+ * walk then skip-and-warns and holds the dir.
+ */
+async function defaultLoadRepoSlug(configPath: string): Promise<string> {
+  const user = await loadUserConfig(configPath);
+  const slug = user.repoSlug;
+  if (typeof slug !== "string" || slug.trim().length === 0) {
+    throw new Error(`missing or empty repoSlug in ${configPath}`);
+  }
+  return slug.trim();
+}
+
+/**
+ * Resolve the root `workspace: { depth? }` block, if any. A missing / unreadable
+ * root config is not workspace mode (detection ladder falls through to nested /
+ * flat). A present but *malformed* `workspace` field throws — same as boot.
+ */
+async function resolveWorkspaceDepth(configDir: string): Promise<number | null> {
+  const rootConfigPath = join(configDir, TENANT_CONFIG_FILE);
+  if (!existsSync(rootConfigPath)) return null;
+  let root: Record<string, unknown>;
+  try {
+    root = (await loadUserConfig(rootConfigPath)) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const workspace = readWorkspaceField(root);
+  return workspace?.depth ?? null;
+}
+
+/**
+ * Enumerate workspace-mode children via the same walk ticket 1 / #91 uses
+ * (`discoverWorkspaceTenants`). Valid children surface full health columns;
+ * broken (hold) dirs appear with `configValid: false` so `phoebe list` still
+ * flags them. Nested/flat scanning is unchanged (#95).
+ */
+async function listWorkspaceTenants(opts: {
+  configDir: string;
+  dataBase: string;
+  depth: number;
+  loadRepoSlug?: (configPath: string) => string | Promise<string>;
+}): Promise<TenantListing[]> {
+  const discovery = await discoverWorkspaceTenants(opts.configDir, opts.depth, {
+    loadRepoSlug: opts.loadRepoSlug ?? defaultLoadRepoSlug,
+  });
+  const listings: TenantListing[] = [];
+  for (const tenant of discovery.tenants) {
+    if (tenant.slug === null) continue;
+    listings.push(listingFor(tenant.slug, tenant.dir, opts.dataBase, true));
+  }
+  for (const holdDir of discovery.holdIds) {
+    // No authoritative slug when load/parse failed — show a path-relative id so
+    // the operator can find the broken child; data/status stay dark without a slug.
+    const rel = relative(opts.configDir, holdDir).replace(/\\/g, "/");
+    listings.push({
+      slug: rel.length > 0 ? rel : holdDir,
+      configValid: false,
+      envPresent: envPresent(holdDir),
+      retainedData: false,
+      status: null,
+      queue: [],
+    });
+  }
+  return listings.sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+/** Nested-mode scan: every `repos/<owner>/<repo>/` dir with its health signals. */
+function listNestedTenants(configDir: string, dataBase: string): TenantListing[] {
+  const reposRoot = join(configDir, REPOS_DIR);
   const listings: TenantListing[] = [];
   let owners: string[];
   try {
@@ -236,19 +397,35 @@ export function listTenants(opts: { configDir: string; dataBase: string }): Tena
     for (const repo of repos) {
       const slug = `${owner}/${repo}`;
       const dir = join(reposRoot, owner, repo);
-      const dataDir = join(opts.dataBase, slug);
-      const stateDir = join(dataDir, "state");
-      listings.push({
-        slug,
-        configValid: existsSync(join(dir, TENANT_CONFIG_FILE)),
-        envPresent: envPresent(dir),
-        retainedData: existsSync(dataDir),
-        status: readStatus(join(stateDir, STATUS_FILE)),
-        queue: readTenantQueue(stateDir),
-      });
+      listings.push(listingFor(slug, dir, dataBase, existsSync(join(dir, TENANT_CONFIG_FILE))));
     }
   }
   return listings.sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+/**
+ * Enumerate tenants with health signals for `phoebe list` (#63/#95).
+ *
+ * Detection ladder matches boot (#83): root config has a `workspace` block →
+ * walk the workspace tree (same walk as #91); else scan `repos/` (nested);
+ * else empty (flat has nothing to list beyond "no tenants").
+ */
+export async function listTenants(opts: {
+  configDir: string;
+  dataBase: string;
+  /** Injectable workspace slug loader (tests); defaults to `loadUserConfig`. */
+  loadRepoSlug?: (configPath: string) => string | Promise<string>;
+}): Promise<TenantListing[]> {
+  const depth = await resolveWorkspaceDepth(opts.configDir);
+  if (depth !== null) {
+    return listWorkspaceTenants({
+      configDir: opts.configDir,
+      dataBase: opts.dataBase,
+      depth,
+      loadRepoSlug: opts.loadRepoSlug,
+    });
+  }
+  return listNestedTenants(opts.configDir, opts.dataBase);
 }
 
 /**

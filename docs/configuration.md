@@ -274,8 +274,10 @@ host/dev. These map to the two named volumes in `compose.yml` — see
 
 ## Multiple repos (nested tenants)
 
-A deployment is **flat** (one repo, config in place) or **nested** (many repos),
-selected by the presence of a `repos/` directory beside the top config:
+A deployment is **flat**, **nested**, or **workspace**, selected by the boot
+ladder: a root `workspace` block → workspace; else a `repos/` directory →
+nested; else flat. Workspace topology and the submodule operator runbook live
+in [`workspace.md`](workspace.md). Nested layout:
 
 ```text
 # Flat (phoebe init):            # Nested (after phoebe add-repo):
@@ -296,7 +298,8 @@ selected by the presence of a `repos/` directory beside the top config:
   warning (one engine version for everyone).
 - **`paths` still derives from each tenant's `repoSlug`**, identically in both
   modes. Use `phoebe add-repo` / `remove-repo` / `list` / `purge` to manage
-  tenants (see [`operating.md`](operating.md)).
+  nested tenants (see [`operating.md`](operating.md)); for workspace children
+  use `init --tenant` after linking the checkout ([`workspace.md`](workspace.md)).
 
 ## Engine source (`engine`)
 
@@ -452,6 +455,7 @@ config-file territory.
 
 Secrets (`GH_TOKEN` and the active provider's key) are also read from the
 environment — see [`ai-install.md`](ai-install.md) and `.env.example`. In a
-nested deployment each tenant's secrets live in its own co-located `.env`, read
-by the supervisor and scrubbed so a tenant's engine child sees only its own.
+nested or workspace deployment each tenant's secrets live in its own co-located
+`.env`, read by the supervisor and scrubbed so a tenant's engine child sees only
+its own (workspace two-tier model: [`workspace.md`](workspace.md)).
 </content>

@@ -118,7 +118,7 @@ RUN set -eux; \
     echo "${cursor_sha}  /tmp/cursor-agent.tar.gz" | sha256sum -c -; \
     mkdir -p /opt/cursor-agent; \
     tar --strip-components=1 -xzf /tmp/cursor-agent.tar.gz -C /opt/cursor-agent; \
-    chmod 0711 /opt/cursor-agent/cursor-agent; \
+    chmod 0711 /opt/cursor-agent/node; \
     rm /tmp/cursor-agent.tar.gz; \
     ln -s /opt/cursor-agent/cursor-agent /usr/local/bin/agent; \
     ln -s /opt/cursor-agent/cursor-agent /usr/local/bin/cursor-agent
@@ -126,6 +126,21 @@ RUN set -eux; \
 # installer we replaced also created `cursor-agent`, and Cursor's own docs use
 # that name. Dropping it would make this a silent behaviour regression for
 # anyone whose scripts follow those docs.
+#
+# `chmod 0711 …/node` is the multi-tenant secret-isolation guard (#61), and it
+# is deliberately on `node`, not on the `cursor-agent` entry point. Every entry
+# point the vendor ships — `cursor-agent`, `cursor-agent-svc`, `cursor-askpass`
+# — is a *shell script* that just execs this bundled `node`; a shell script must
+# stay readable by its interpreter, so chmod-ing the entry point 0711 only makes
+# it fail to run (`bash: …/agent: Permission denied`, exit 126). `node` is the
+# one binary that actually holds the agent's environment — GH_TOKEN and the
+# active provider's API key (src/agent-env.ts) — in a long-lived process. Making
+# it execute-only-to-others (root-owned 0711) means the unprivileged uid can
+# exec it but not read it, so the kernel marks the exec AT_SECURE and the
+# process non-dumpable: a same-uid sibling tenant cannot read its
+# /proc/<pid>/environ and lift the keyring. One chmod covers all three entry
+# points, since they funnel through this same `node`. Execute-only ELFs run
+# fine (the loader maps the image; the readable .node addons load normally).
 #
 # The installer would have put these in ~/.local/bin and needed a PATH entry
 # pointing into a home directory. /usr/local/bin is already on PATH for every

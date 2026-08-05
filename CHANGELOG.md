@@ -1,5 +1,50 @@
 # phoebe-agent
 
+## 0.2.0
+
+### Minor Changes
+
+- 8bbfa25: Multi-tenant Phoebe: run one container that supervises many repos (map #57). A
+  single deployment can now discover a fleet of tenants from
+  `/etc/phoebe/repos/<owner>/<repo>/` — each with its own `phoebe.config.ts` and
+  `.env` — and run one supervised engine child per tenant behind a global
+  concurrency cap, per-tenant `[phoebe:<slug>]` log tagging, per-tenant
+  `state/<slug>/status.json`, and `phoebe list`. Env-scrub isolation hands each
+  child only its own secrets. The flat single-tenant layout still works
+  unchanged; nested discovery is additive.
+- 8bbfa25: Wire the poison-unit quarantine write path into the engine (#75/#80). A unit of
+  work that repeatedly fails is now quarantined rather than retried indefinitely,
+  keeping a poison ticket from stalling the fleet.
+- 8bbfa25: Workspace discovery mode (map #81): run `phoebe` at the root of a workspace
+  whose child repos are linked as submodules, each carrying its own in-tree
+  Phoebe install (config + gitignored `.env`). Phoebe walks the tree, reads each
+  child's config, and feeds the same tenant abstraction as multi-tenant mode —
+  one supervised engine child per tenant, still cloning each repo privately (the
+  local checkout is a discovery + config source only). A `workspace: { depth }`
+  block in the root `phoebe.config.ts` selects the mode. Highlights:
+
+  - Discover and supervise a fleet from the submodule tree, reconciling on every
+    poll as children come and go.
+  - Child `repoSlug` stays authoritative; the submodule `origin` is a best-effort
+    cross-check, and duplicate slug/origin across the fleet is a fatal boot abort.
+  - `phoebe list` and per-tenant status surface workspace tenants.
+  - Two new scaffolder profiles: `phoebe init --workspace` (root) and
+    `phoebe init --tenant` (child, prefilling `repoSlug`/`repoUrl` from the
+    child's `origin`).
+  - Topology docs and an operator runbook for the workspace layout.
+
+### Patch Changes
+
+- 8bbfa25: Bound `superviseFleet.drain` with a SIGKILL escalation (#79). Draining the fleet
+  on shutdown no longer hangs indefinitely on a child that ignores SIGTERM — the
+  supervisor escalates to SIGKILL after a bounded grace period.
+- 8bbfa25: Let the conflict-resolution agent drop relocated or superseded hunks (#89)
+  instead of forcing every hunk to apply, so a rebase whose changes have moved or
+  already landed upstream resolves cleanly.
+- 8bbfa25: Fix two container-boot blockers surfaced by dogfooding: the Corepack download
+  prompt hanging boot, and the agent child's `0711` permissions preventing it from
+  running.
+
 ## 0.1.1
 
 ### Patch Changes

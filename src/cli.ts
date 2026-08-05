@@ -32,7 +32,13 @@ import {
   parseResolvedConfigurationSnapshot,
   type ResolvedConfiguration,
 } from "./config-resolution.ts";
-import { copyShippedPromptsInto, formatInitReport, runInit } from "./init.ts";
+import {
+  copyShippedPromptsInto,
+  formatInitReport,
+  initTenant,
+  runInit,
+  type InitProfile,
+} from "./init.ts";
 import { resolveConfigPath } from "./load-config.ts";
 import { resolveDataBase } from "./paths.ts";
 import { setResolvedConfig } from "./resolved-config.ts";
@@ -91,21 +97,75 @@ export function parseCliArgs(argv: readonly string[]): ParsedArgs {
   return { configPath, help, forward };
 }
 
-export type ParsedInitArgs = { targetDir: string; help: boolean };
+export type ParsedInitArgs = {
+  targetDir: string;
+  help: boolean;
+  /**
+   * Scaffold profile. Default `flat` (today's single-tenant layout).
+   * `--workspace` and `--tenant` are mutually exclusive (#93/#94).
+   */
+  profile: InitProfile;
+  /** Tenant profile: explicit slug override (wins over origin prefill). */
+  repoSlug?: string;
+  /** Tenant profile: explicit url override (wins over origin prefill). */
+  repoUrl?: string;
+  /** Tenant profile: opt-in seed of shipped prompts. */
+  withPrompts: boolean;
+};
 export type ParsedStatusArgs = { configPath: string | undefined; help: boolean };
 
 /**
  * Parse argv left after the leading `init` token has been consumed. Supports
- * an optional positional target directory (`phoebe init ./my-agent`) and
- * `--help`. Extra flags are rejected loudly so a typo like `--forcee` fails
- * fast instead of being silently ignored.
+ * an optional positional target directory (`phoebe init ./my-agent`), the
+ * mutually exclusive profile flags `--workspace` / `--tenant`, tenant-only
+ * overrides (`--slug`, `--url`, `--with-prompts`), and `--help`. Extra flags
+ * are rejected loudly so a typo like `--forcee` fails fast instead of being
+ * silently ignored.
  */
 export function parseInitArgs(argv: readonly string[]): ParsedInitArgs {
   let targetDir: string | undefined;
   let help = false;
-  for (const arg of argv) {
+  let profile: InitProfile = "flat";
+  let profileFlag: string | undefined;
+  let repoSlug: string | undefined;
+  let repoUrl: string | undefined;
+  let withPrompts = false;
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
     if (arg === "--help" || arg === "-h") {
       help = true;
+      continue;
+    }
+    if (arg === "--workspace" || arg === "--tenant") {
+      if (profileFlag !== undefined) {
+        throw new Error(
+          `\`phoebe init\` flags \`--workspace\` and \`--tenant\` are mutually exclusive ` +
+            `(got both \`${profileFlag}\` and \`${arg}\`).`,
+        );
+      }
+      profileFlag = arg;
+      profile = arg === "--workspace" ? "workspace" : "tenant";
+      continue;
+    }
+    if (arg === "--with-prompts") {
+      withPrompts = true;
+      continue;
+    }
+    if (arg === "--slug" || arg.startsWith("--slug=")) {
+      const value = arg === "--slug" ? argv[++i] : arg.slice("--slug=".length);
+      if (value === undefined || value.length === 0 || value.startsWith("-")) {
+        throw new Error("`--slug` requires an `owner/repo` value.");
+      }
+      repoSlug = value;
+      continue;
+    }
+    if (arg === "--url" || arg.startsWith("--url=")) {
+      const value = arg === "--url" ? argv[++i] : arg.slice("--url=".length);
+      if (value === undefined || value.length === 0 || value.startsWith("-")) {
+        throw new Error("`--url` requires a git remote URL value.");
+      }
+      repoUrl = value;
       continue;
     }
     if (arg.startsWith("-")) {
@@ -118,7 +178,21 @@ export function parseInitArgs(argv: readonly string[]): ParsedInitArgs {
     }
     targetDir = arg;
   }
-  return { targetDir: targetDir ?? ".", help };
+
+  if ((repoSlug !== undefined || repoUrl !== undefined || withPrompts) && profile !== "tenant") {
+    throw new Error(
+      `\`--slug\`, \`--url\`, and \`--with-prompts\` are only valid with \`phoebe init --tenant\`.`,
+    );
+  }
+
+  return {
+    targetDir: targetDir ?? ".",
+    help,
+    profile,
+    ...(repoSlug !== undefined ? { repoSlug } : {}),
+    ...(repoUrl !== undefined ? { repoUrl } : {}),
+    withPrompts,
+  };
 }
 
 export type ParsedConfigResolveArgs = { configPath: string | undefined };
@@ -214,7 +288,9 @@ const HELP_TEXT = `phoebe — AFK coding agent
 
 Usage:
   phoebe setup [dir]               Interactive wizard: scaffold + fill config & .env
-  phoebe init [dir]                Scaffold a deployment (flat single-tenant)
+  phoebe init [dir]                Scaffold a flat single-tenant deployment
+  phoebe init --workspace [dir]    Scaffold a workspace root (multi-child)
+  phoebe init --tenant [dir]       Scaffold a workspace child in-tree install
   phoebe add-repo <owner/repo>     Add a tenant (→ nested multi-tenant)
   phoebe remove-repo <owner/repo>  Remove a tenant's config (data retained)
   phoebe list                      List tenants + health (in-container)
@@ -247,19 +323,40 @@ Runtime toggles (read directly by the engine, not overlaid onto the config):
 const INIT_HELP_TEXT = `phoebe init — scaffold a consumer-owned runtime
 
 Usage:
-  phoebe init [dir]
+  phoebe init [dir]                 Flat single-tenant deployment (default)
+  phoebe init --workspace [dir]     Workspace root (engine + workspace block)
+  phoebe init --tenant [dir]        Workspace child in-tree install
+                                    [--slug owner/repo] [--url <git-url>] [--with-prompts]
 
-Writes into [dir] (default: current directory):
-  phoebe.config.ts             Consumer config starter (edit the five required fields)
-  prompts/                     Copies of the shipped agent prompts (edit to override)
-  .env.example                 Documented environment variables to copy to .env
-  .gitignore                   Additive — appends Phoebe entries only
-  container/Dockerfile         Runtime image (Node 24 + git + gh, entrypoint: phoebe boot)
-  container/compose.yml        Compose config for the long-lived boot container
-  container/compose.local.yml  Dev overlay to run an engine checkout from your host
+Profiles (mutually exclusive; default is flat):
 
-Existing files are left untouched, so re-running is safe. To regenerate a
-scaffolded file, delete it first and re-run \`phoebe init\`.
+  flat (default) writes into [dir]:
+    phoebe.config.ts             Consumer config starter (five required fields + engine)
+    prompts/                     Copies of the shipped agent prompts (edit to override)
+    .env.example                 Documented environment variables to copy to .env
+    .gitignore                   Additive — .env, repos/**/.env, node_modules/
+    container/Dockerfile         Runtime image (Node 24 + git + gh, entrypoint: phoebe boot)
+    container/compose.yml        Compose config for the long-lived boot container
+    container/compose.local.yml  Dev overlay to run an engine checkout from your host
+
+  --workspace writes into [dir]:
+    phoebe.config.ts             engine + workspace: { depth: 1 } only (no per-repo fields)
+    .env.example                 Deployment secrets (GH_TOKEN, provider keys) — no tenant secrets
+    .gitignore                   Additive — .env, node_modules/
+    container/                   Same #57 templates as flat, plus README.md mount docs
+    (no prompts/, no child files — link children then run init --tenant)
+
+  --tenant writes a child's in-tree install (after \`git submodule add\`):
+    phoebe.config.ts             Per-tenant config (no engine; repoSlug authoritative)
+    .env.example                 Per-tenant secrets template (copy to .env)
+    .gitignore                   Additive — .env
+    prompts/                     Only with --with-prompts
+    (no container/ — deployment-level, owned by the workspace root)
+
+    Prefills repoSlug/repoUrl from the child's \`origin\` remote; --slug/--url win.
+    Absent origin → placeholder slug/url the operator fills. Re-run refuses if config exists.
+
+Flat/workspace: existing files are left untouched. Tenant: refuses to overwrite.
 `;
 
 const STATUS_HELP_TEXT = `phoebe status — read the local runtime projection
@@ -375,8 +472,8 @@ function formatTenantListing(listing: TenantListing): string {
 }
 
 /** `phoebe list` — enumerate tenants + health (reads status.json). */
-function runListCli(): void {
-  const listings = listTenants({
+async function runListCli(): Promise<void> {
+  const listings = await listTenants({
     configDir: process.cwd(),
     dataBase: resolveDataBase(process.env),
   });
@@ -432,7 +529,24 @@ export async function runCli(): Promise<void> {
       process.stdout.write(INIT_HELP_TEXT);
       return;
     }
-    const report = runInit({ targetDir: parsed.targetDir });
+    if (parsed.profile === "tenant") {
+      const result = initTenant({
+        targetDir: parsed.targetDir,
+        ...(parsed.repoSlug !== undefined ? { repoSlug: parsed.repoSlug } : {}),
+        ...(parsed.repoUrl !== undefined ? { repoUrl: parsed.repoUrl } : {}),
+        withPrompts: parsed.withPrompts,
+        ...(parsed.withPrompts ? { seedPrompt: (dir: string) => copyShippedPromptsInto(dir) } : {}),
+      });
+      process.stdout.write(
+        formatInitReport(result, parsed.targetDir) +
+          `  repoSlug: ${result.repoSlug}\n` +
+          `  repoUrl:  ${result.repoUrl}\n` +
+          `\nFill in ${result.tenantDir}/.env (copy .env.example). ` +
+          `Workspace discovery picks this child up on the next boot poll.\n`,
+      );
+      return;
+    }
+    const report = runInit({ targetDir: parsed.targetDir, profile: parsed.profile });
     process.stdout.write(formatInitReport(report, parsed.targetDir));
     return;
   }
@@ -496,7 +610,7 @@ export async function runCli(): Promise<void> {
   // data volume. None load the engine config.
   if (args[0] === "add-repo") return runAddRepoCli(args.slice(1));
   if (args[0] === "remove-repo") return runRemoveRepoCli(args.slice(1));
-  if (args[0] === "list") return runListCli();
+  if (args[0] === "list") return await runListCli();
   if (args[0] === "purge") return runPurgeCli(args.slice(1));
 
   const parsed = parseCliArgs(args);

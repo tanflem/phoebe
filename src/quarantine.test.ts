@@ -8,9 +8,12 @@ import {
   buildQuarantineComment,
   buildUnitAttemptMarker,
   buildUnitTimeoutMarker,
+  decideTimeoutRecord,
   DEFAULT_MAX_UNIT_ATTEMPTS,
   DEFAULT_MAX_UNIT_TIMEOUTS,
   findLatestUnitAttemptComment,
+  latestTimeoutMarker,
+  newestForeignCommentAt,
   nextAttemptCount,
   nextTimeoutCount,
   parseQuarantineBaseline,
@@ -116,6 +119,137 @@ describe("count + quarantine decisions", () => {
   test("quarantines at the threshold", () => {
     expect(shouldQuarantine(2, 3)).toBe(false);
     expect(shouldQuarantine(3, 3)).toBe(true);
+  });
+});
+
+describe("latestTimeoutMarker", () => {
+  test("null when the unit has never timed out", () => {
+    expect(
+      latestTimeoutMarker([{ body: "just a human comment", createdAt: "2026-01-01T00:00:00Z" }]),
+    ).toBeNull();
+    expect(latestTimeoutMarker([])).toBeNull();
+  });
+
+  test("returns the newest marker's n and its comment createdAt", () => {
+    const comments = [
+      { body: buildUnitTimeoutMarker(1), createdAt: "2026-01-01T00:00:00Z" },
+      { body: "a human replied", createdAt: "2026-01-02T00:00:00Z" },
+      { body: buildUnitTimeoutMarker(2), createdAt: "2026-01-03T00:00:00Z" },
+    ];
+    expect(latestTimeoutMarker(comments)).toEqual({ n: 2, createdAt: "2026-01-03T00:00:00Z" });
+  });
+});
+
+describe("newestForeignCommentAt", () => {
+  const phoebe = "phoebe-bot";
+  test("null when there are no foreign comments", () => {
+    expect(
+      newestForeignCommentAt([{ createdAt: "2026-01-01T00:00:00Z", authorLogin: phoebe }], phoebe),
+    ).toBeNull();
+    expect(newestForeignCommentAt([], phoebe)).toBeNull();
+  });
+  test("a deleted author (empty login) still counts as foreign activity", () => {
+    // main.ts coerces a null GitHub author to "" — never Phoebe (whose login is
+    // always non-empty here), so such a comment must count toward the reset.
+    expect(
+      newestForeignCommentAt([{ createdAt: "2026-01-03T00:00:00Z", authorLogin: "" }], phoebe),
+    ).toBe("2026-01-03T00:00:00Z");
+  });
+  test("ignores Phoebe's own comments and returns the newest foreign instant", () => {
+    expect(
+      newestForeignCommentAt(
+        [
+          { createdAt: "2026-01-05T00:00:00Z", authorLogin: phoebe },
+          { createdAt: "2026-01-02T00:00:00Z", authorLogin: "human" },
+          { createdAt: "2026-01-04T00:00:00Z", authorLogin: "other" },
+        ],
+        phoebe,
+      ),
+    ).toBe("2026-01-04T00:00:00Z");
+  });
+});
+
+describe("decideTimeoutRecord (engine write-path core)", () => {
+  const k = 3;
+  const phoebe = "phoebe-bot";
+
+  test("first timeout with no prior marker records 1 and does not quarantine", () => {
+    expect(
+      decideTimeoutRecord({
+        comments: [{ body: "hello", createdAt: "2026-01-01T00:00:00Z", authorLogin: "human" }],
+        phoebeLogin: phoebe,
+        k,
+      }),
+    ).toEqual({ count: 1, quarantine: false });
+  });
+
+  test("carries the prior count when no foreign activity is newer than the marker", () => {
+    expect(
+      decideTimeoutRecord({
+        comments: [
+          { body: "human note", createdAt: "2026-01-02T00:00:00Z", authorLogin: "human" },
+          {
+            body: buildUnitTimeoutMarker(1),
+            createdAt: "2026-01-03T00:00:00Z",
+            authorLogin: phoebe,
+          },
+        ],
+        phoebeLogin: phoebe,
+        k,
+      }),
+    ).toEqual({ count: 2, quarantine: false });
+  });
+
+  test("Phoebe's own newer marker never resets the count (the #80 blocker)", () => {
+    // A marker comment authored by Phoebe is newer than the prior marker, but
+    // must NOT count as reset-triggering activity — else the count never climbs.
+    expect(
+      decideTimeoutRecord({
+        comments: [
+          {
+            body: buildUnitTimeoutMarker(2),
+            createdAt: "2026-01-03T00:00:00Z",
+            authorLogin: phoebe,
+          },
+        ],
+        phoebeLogin: phoebe,
+        k,
+      }),
+    ).toEqual({ count: 3, quarantine: true });
+  });
+
+  test("resets to 1 when a foreign comment landed after the latest marker", () => {
+    expect(
+      decideTimeoutRecord({
+        comments: [
+          {
+            body: buildUnitTimeoutMarker(2),
+            createdAt: "2026-01-03T00:00:00Z",
+            authorLogin: phoebe,
+          },
+          { body: "a human pushed a fix", createdAt: "2026-01-04T00:00:00Z", authorLogin: "human" },
+        ],
+        phoebeLogin: phoebe,
+        k,
+      }),
+    ).toEqual({ count: 1, quarantine: false });
+  });
+
+  test("resets when the extra activity instant (a PR push) is newer than the marker", () => {
+    expect(
+      decideTimeoutRecord({
+        comments: [
+          {
+            body: buildUnitTimeoutMarker(2),
+            createdAt: "2026-01-03T00:00:00Z",
+            authorLogin: phoebe,
+          },
+        ],
+        phoebeLogin: phoebe,
+        extraActivityAt: "2026-01-04T00:00:00Z",
+        k,
+      }),
+    ).toEqual({ count: 1, quarantine: false });
   });
 });
 

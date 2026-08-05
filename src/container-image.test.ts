@@ -129,15 +129,25 @@ describe.each(Object.entries(DOCKERFILES))("%s", (_label, relPath) => {
     }
   });
 
-  test("ships the vendored agent binary 0711 (secureexec → non-dumpable, #61)", () => {
+  test("ships the vendored node 0711 (secureexec → non-dumpable, #61)", () => {
     // The agent runs as the same uid 10001 as every tenant's engine child. A
     // process that execs a binary it cannot *read* becomes a secureexec, so the
     // kernel sets it non-dumpable — a same-uid sibling can't read its
     // /proc/<pid>/environ and lift another tenant's secrets. Enforced by shipping
     // the binary root:root mode 0711 (executable, not readable by others), inside
     // the pinned install block so it can't drift.
+    //
+    // The 0711 is on `node`, NOT on the `cursor-agent` entry point: every entry
+    // point the vendor ships is a *shell script* that execs this bundled `node`,
+    // and a shell script chmod-ed 0711 just fails to run (its interpreter can't
+    // read it — `bash: agent: Permission denied`, exit 126). `node` is the
+    // long-lived process that actually holds GH_TOKEN and the provider key
+    // (src/agent-env.ts) in its environ, so it is the one that must be
+    // non-dumpable — and every entry point funnels through it, so one chmod
+    // covers them all. Guard against a regression back onto the wrapper.
     const block = providerInstallBlock(read(relPath));
-    expect(block).toMatch(/chmod 0711 \/opt\/cursor-agent\/cursor-agent/);
+    expect(block).toMatch(/chmod 0711 \/opt\/cursor-agent\/node/);
+    expect(block).not.toMatch(/chmod 0711 \/opt\/cursor-agent\/cursor-agent/);
   });
 
   test("keeps the provider CLI on PATH as `agent` after the privilege drop", () => {

@@ -146,11 +146,17 @@ See the [environment overlay table](configuration.md#environment-overlay-phoebe_
 
 ## Running many repos in one container
 
-One container can serve several repos as **tenants**. Each is a directory under
-`repos/<owner>/<repo>/` in the deployment; the supervisor runs one engine child
-per tenant and reconciles the set on every poll — **no restart** to add or remove
-one. Read [`trust.md`](trust.md) first: co-locating repos means co-locating them
-in one trust domain.
+One container can serve several repos as **tenants**. The supervisor runs one
+engine child per tenant and reconciles the set on every poll — **no restart** to
+add or remove one. There are two discovery layouts:
+
+- **Nested** — directories under `repos/<owner>/<repo>/` (this section).
+- **Workspace** — linked child checkouts under a root that declares
+  `workspace: { depth }` (submodules preferred). Full topology + runbook:
+  [`workspace.md`](workspace.md).
+
+Read [`trust.md`](trust.md) first: co-locating repos means co-locating them in
+one trust domain.
 
 | Action                                  | How                                                                                                                                                            |
 | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -1,17 +1,39 @@
 // `phoebe init` scaffolder. Given a target directory, drops the consumer-owned
-// runtime into place: `phoebe.config.ts`, a `prompts/` dir with copies of the
-// shipped defaults (edit-and-commit), `.env.example`, `.gitignore` entries,
-// and the `container/` templates (Dockerfile, compose, and a dev-only overlay
-// for running a local engine checkout). Re-runs are guarded — an existing file
-// is skipped, not silently overwritten, so consumer edits are safe.
+// runtime into place. Three profiles share this module:
 //
+//   flat (default)   Full single-tenant runtime: config (five required fields
+//                    + engine), prompts/, .env.example, container/, gitignore.
+//   workspace (#93)  Bootable workspace *root*: engine + workspace block,
+//                    deployment .env.example, container/ (incl. mount docs),
+//                    gitignore. No child files, no prompts/.
+//   tenant (#94)     Child in-tree install at a repo root: config + .env.example
+//                    + .gitignore'd .env (no container/). Prefills repoSlug/
+//                    repoUrl from the checkout's origin; refuses re-clobber.
+//
+// Flat/workspace re-runs skip existing files. Tenant re-runs refuse loudly
+// when a root `phoebe.config.ts` already exists (mirror add-repo).
 // The plan/render split keeps the pure logic (what files, what placeholders)
 // separately testable from the fs I/O in `runInit`.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
+import { TENANT_CONFIG_FILE, TENANT_ENV_FILE } from "../bootstrap/tenants.ts";
 import { CONFIG_DEFAULTS } from "./config-schema.ts";
+import { defaultGit, type GitRunner } from "./git-model.ts";
+import {
+  defaultRepoUrl,
+  parseSlug,
+  renderTenantConfig,
+  slugFromRemoteUrl,
+  stripUrlCredentials,
+  TENANT_ENV_EXAMPLE,
+  TENANT_PLACEHOLDER_SLUG,
+  TENANT_PLACEHOLDER_URL,
+} from "./tenant-commands.ts";
+
+/** Init scaffold profile — which file set lands under the target dir. */
+export type InitProfile = "flat" | "workspace" | "tenant";
 
 /** Placeholder tokens rendered into every scaffolded file. */
 export type TemplateParams = {
@@ -64,16 +86,76 @@ export type PlannedOutput = {
     | { kind: "gitignore"; entries: readonly string[] };
 };
 
-// `.env` (flat/deployment secrets) and every per-tenant `repos/<owner>/<repo>/.env`
+// Flat gitignore: deployment `.env`, every per-tenant `repos/<owner>/<repo>/.env`
 // (#63) must never be committed; `node_modules/` for the scaffolded toolchain.
-const GITIGNORE_ENTRIES = [".env", "repos/**/.env", "node_modules/"] as const;
+const FLAT_GITIGNORE_ENTRIES = [".env", "repos/**/.env", "node_modules/"] as const;
+
+// Workspace root: only deployment `.env` (children carry their own `.env` and
+// `.gitignore` when scaffolded with `init --tenant`).
+const WORKSPACE_GITIGNORE_ENTRIES = [".env", "node_modules/"] as const;
+
+// Workspace child in-tree install: secrets stay out of the child repo.
+const TENANT_GITIGNORE_ENTRIES = [".env"] as const;
+
+/** Shared container files scaffolded for flat and workspace roots. */
+function planContainerOutputs(): PlannedOutput[] {
+  return [
+    {
+      destRelPath: "container/Dockerfile",
+      source: { kind: "template", templateRelPath: "container/Dockerfile" },
+    },
+    {
+      destRelPath: "container/compose.yml",
+      source: { kind: "template", templateRelPath: "container/compose.yml" },
+    },
+    {
+      destRelPath: "container/compose.local.yml",
+      source: { kind: "template", templateRelPath: "container/compose.local.yml" },
+    },
+  ];
+}
 
 /**
- * Enumerate every file init will produce. The prompt list is derived from
- * `CONFIG_DEFAULTS.promptFiles` so adding a new prompt kind to the engine
- * automatically gets scaffolded — no drift between the two lists.
+ * Enumerate every file init will produce for a profile. Flat prompts are
+ * derived from `CONFIG_DEFAULTS.promptFiles` so adding a new prompt kind to
+ * the engine automatically gets scaffolded — no drift between the two lists.
+ *
+ * Tenant profile (`init --tenant`) is handled by {@link initTenant} — origin
+ * prefill makes the config dynamic, so it is not part of this static plan.
  */
-export function planInitOutputs(): PlannedOutput[] {
+export function planInitOutputs(profile: InitProfile = "flat"): PlannedOutput[] {
+  if (profile === "tenant") {
+    throw new Error(
+      "`phoebe init --tenant` uses initTenant() (dynamic origin prefill), not planInitOutputs.",
+    );
+  }
+
+  if (profile === "workspace") {
+    return [
+      {
+        destRelPath: "phoebe.config.ts",
+        source: { kind: "template", templateRelPath: "phoebe.config.workspace.ts" },
+      },
+      {
+        destRelPath: ".env.example",
+        source: { kind: "template", templateRelPath: ".env.example" },
+      },
+      ...planContainerOutputs(),
+      // Mount docs (#87/#93): workspace operators need `.git` on the mount and
+      // materialised submodules before boot. Lives beside the #57 container
+      // templates; not rendered (no placeholders).
+      {
+        destRelPath: "container/README.md",
+        source: { kind: "template", templateRelPath: "container/README.md" },
+      },
+      {
+        destRelPath: ".gitignore",
+        source: { kind: "gitignore", entries: WORKSPACE_GITIGNORE_ENTRIES },
+      },
+    ];
+  }
+
+  // flat — today's single-tenant deployment scaffold
   const promptOutputs: PlannedOutput[] = Object.values(CONFIG_DEFAULTS.promptFiles).map(
     (relPath) => ({
       destRelPath: relPath,
@@ -89,22 +171,11 @@ export function planInitOutputs(): PlannedOutput[] {
       destRelPath: ".env.example",
       source: { kind: "template", templateRelPath: ".env.example" },
     },
-    {
-      destRelPath: "container/Dockerfile",
-      source: { kind: "template", templateRelPath: "container/Dockerfile" },
-    },
-    {
-      destRelPath: "container/compose.yml",
-      source: { kind: "template", templateRelPath: "container/compose.yml" },
-    },
-    {
-      destRelPath: "container/compose.local.yml",
-      source: { kind: "template", templateRelPath: "container/compose.local.yml" },
-    },
+    ...planContainerOutputs(),
     ...promptOutputs,
     {
       destRelPath: ".gitignore",
-      source: { kind: "gitignore", entries: GITIGNORE_ENTRIES },
+      source: { kind: "gitignore", entries: FLAT_GITIGNORE_ENTRIES },
     },
   ];
 }
@@ -197,6 +268,8 @@ function resolvePackageResource(relativePath: string, moduleDir: string): string
 export type RunInitOptions = {
   /** Directory the scaffolded files land under. Created if missing. */
   targetDir: string;
+  /** Scaffold profile (flat | workspace | tenant). Default: flat. */
+  profile?: InitProfile;
   /** Override any template params (repo/toolchain values, provider, `cliBin`). */
   params?: Partial<TemplateParams>;
   /** Root for shipped `templates/` and `prompts/` (test seam). Defaults to
@@ -238,6 +311,10 @@ export function readTemplate(templateRelPath: string, packageRoot?: string): str
  */
 export function runInit(opts: RunInitOptions): InitReport {
   const targetDir = resolvePath(opts.targetDir);
+  const profile = opts.profile ?? "flat";
+  if (profile === "tenant") {
+    throw new Error("`phoebe init --tenant` uses initTenant(), not runInit().");
+  }
   const params: TemplateParams = { ...DEFAULT_TEMPLATE_PARAMS, ...opts.params };
   const moduleDir = dirname(fileURLToPath(import.meta.url));
 
@@ -245,7 +322,7 @@ export function runInit(opts: RunInitOptions): InitReport {
 
   const report: InitReport = { created: [], updated: [], skipped: [] };
 
-  for (const output of planInitOutputs()) {
+  for (const output of planInitOutputs(profile)) {
     const destAbs = join(targetDir, output.destRelPath);
     mkdirSync(dirname(destAbs), { recursive: true });
 
@@ -287,6 +364,138 @@ export function runInit(opts: RunInitOptions): InitReport {
   }
 
   return report;
+}
+
+/**
+ * Read `origin` at scaffold time (`git -C <dir> remote get-url origin`).
+ * Returns null when the remotes are missing/unreadable — not a fatal error;
+ * `initTenant` falls back to placeholders the operator fills.
+ */
+export function readOriginRemoteUrl(dir: string, git: GitRunner = defaultGit): string | null {
+  try {
+    const url = git(["remote", "get-url", "origin"], { cwd: dir }).trim();
+    return url.length > 0 ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+export type InitTenantResult = InitReport & {
+  /** Directory the in-tree install landed in. */
+  tenantDir: string;
+  /** Authoritative slug written into the config. */
+  repoSlug: string;
+  repoUrl: string;
+};
+
+export type InitTenantOptions = {
+  /** Child checkout root (operator runs this after `git submodule add`). */
+  targetDir: string;
+  /** Explicit slug wins over origin-derived (#85 written form is authoritative). */
+  repoSlug?: string;
+  /** Explicit url wins over origin (and over defaultRepoUrl(slug)). */
+  repoUrl?: string;
+  installCommand?: string;
+  checkCommand?: string;
+  testCommand?: string;
+  /** Opt-in seed of shipped prompts into `prompts/` (#63 pattern). */
+  withPrompts?: boolean;
+  /** Override prompt seeder (tests). Defaults to {@link copyShippedPromptsInto}. */
+  seedPrompt?: (promptsDir: string) => string[];
+  /** Git runner seam for origin prefill (tests). */
+  git?: GitRunner;
+};
+
+/**
+ * Scaffold a workspace child's in-tree Phoebe install at its repo root (#94).
+ *
+ * Layout (no `container/` — that is deployment-level, owned by the workspace
+ * root): `phoebe.config.ts`, `.env.example`, `.gitignore` entry for `.env`.
+ * Prefills `repoSlug`/`repoUrl` from the child's `origin` when present;
+ * otherwise writes placeholders. Refuses if a root `phoebe.config.ts` already
+ * exists (loud re-run, mirrors `add-repo`).
+ */
+export function initTenant(opts: InitTenantOptions): InitTenantResult {
+  const tenantDir = resolvePath(opts.targetDir);
+  const configPath = join(tenantDir, TENANT_CONFIG_FILE);
+  if (existsSync(configPath)) {
+    throw new Error(
+      `Tenant install already exists at ${configPath}. ` +
+        `Edit it in place, or delete it first — refusing to overwrite.`,
+    );
+  }
+
+  mkdirSync(tenantDir, { recursive: true });
+
+  const git = opts.git ?? defaultGit;
+  // Scaffold-time one-shot origin read (#94). Distinct from the runtime
+  // #86 supervisor origin checks. Explicit operator flags always win.
+  const originUrl = readOriginRemoteUrl(tenantDir, git);
+  const originSlug = originUrl !== null ? slugFromRemoteUrl(originUrl) : null;
+
+  let repoSlug: string;
+  if (opts.repoSlug !== undefined) {
+    parseSlug(opts.repoSlug);
+    repoSlug = opts.repoSlug;
+  } else if (opts.repoUrl !== undefined) {
+    repoSlug = slugFromRemoteUrl(opts.repoUrl) ?? TENANT_PLACEHOLDER_SLUG;
+  } else if (originSlug !== null) {
+    repoSlug = originSlug;
+  } else {
+    repoSlug = TENANT_PLACEHOLDER_SLUG;
+  }
+
+  let repoUrl: string;
+  if (opts.repoUrl !== undefined) {
+    repoUrl = opts.repoUrl;
+  } else if (opts.repoSlug !== undefined) {
+    repoUrl = defaultRepoUrl(opts.repoSlug);
+  } else if (originUrl !== null) {
+    repoUrl = originUrl;
+  } else {
+    repoUrl = TENANT_PLACEHOLDER_URL;
+  }
+  // Never persist or print credential-bearing URLs (#94): a tokenised origin or
+  // `--url` would otherwise leak into the committed config and the init report.
+  repoUrl = stripUrlCredentials(repoUrl);
+
+  const report: InitReport = { created: [], updated: [], skipped: [] };
+
+  writeFileSync(
+    configPath,
+    renderTenantConfig({
+      repoSlug,
+      repoUrl,
+      installCommand: opts.installCommand ?? "npm ci",
+      checkCommand: opts.checkCommand ?? "npm run check",
+      testCommand: opts.testCommand ?? "npm test",
+    }),
+  );
+  report.created.push(TENANT_CONFIG_FILE);
+
+  const envExamplePath = join(tenantDir, `${TENANT_ENV_FILE}.example`);
+  writeFileSync(envExamplePath, TENANT_ENV_EXAMPLE);
+  report.created.push(`${TENANT_ENV_FILE}.example`);
+
+  const gitignorePath = join(tenantDir, ".gitignore");
+  const existingGitignore = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
+  const merged = mergeGitignore(existingGitignore, TENANT_GITIGNORE_ENTRIES);
+  if (merged !== existingGitignore) {
+    writeFileSync(gitignorePath, merged);
+    report[existingGitignore.length === 0 ? "created" : "updated"].push(".gitignore");
+  } else {
+    report.skipped.push(".gitignore");
+  }
+
+  if (opts.withPrompts) {
+    const seed = opts.seedPrompt ?? ((dir: string) => copyShippedPromptsInto(dir));
+    for (const abs of seed(join(tenantDir, "prompts"))) {
+      // Report as relative `prompts/<name>` under the tenant dir.
+      report.created.push(abs.startsWith(tenantDir) ? abs.slice(tenantDir.length + 1) : abs);
+    }
+  }
+
+  return { ...report, tenantDir, repoSlug, repoUrl };
 }
 
 /**

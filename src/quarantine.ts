@@ -171,6 +171,82 @@ export function shouldQuarantine(count: number, k: number): boolean {
 }
 
 /**
+ * The latest `phoebe-unit-timeout` marker among a unit's comments (given
+ * oldest-first, as `gh` returns them), paired with the `createdAt` of the comment
+ * carrying it — the timestamp the reset-on-activity check compares against. Scans
+ * newest-first so the most recent marker wins. `null` when the unit has never
+ * timed out. This is the timeout-counter analogue of orchestrator's
+ * `parseLatestMarker`, but it must keep the marker comment's timestamp.
+ */
+export function latestTimeoutMarker(
+  comments: readonly { body: string; createdAt: string }[],
+): { n: number; createdAt: string } | null {
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const parsed = parseUnitTimeoutMarker(comments[i]!.body);
+    if (parsed) {
+      return { n: parsed.n, createdAt: comments[i]!.createdAt };
+    }
+  }
+  return null;
+}
+
+/**
+ * The newest comment instant NOT authored by Phoebe, or `null`. This is the reset
+ * signal for a hung unit: a human comment counts, but Phoebe's own timeout
+ * markers must not — otherwise every rotation's marker would look like fresh
+ * activity and the count could never climb to K.
+ */
+export function newestForeignCommentAt(
+  comments: readonly { createdAt: string; authorLogin: string }[],
+  phoebeLogin: string,
+): string | null {
+  let newest: string | null = null;
+  for (const comment of comments) {
+    if (comment.authorLogin === phoebeLogin) {
+      continue;
+    }
+    if (newest === null || comment.createdAt > newest) {
+      newest = comment.createdAt;
+    }
+  }
+  return newest;
+}
+
+/** Later of two optional ISO instants (`gh` returns them Z-normalized, so `>` is chronological). */
+function maxIso(a: string | null, b: string | null): string | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return a > b ? a : b;
+}
+
+/**
+ * Decide the count to record for a just-timed-out unit and whether it crosses the
+ * quarantine threshold. Pure: the engine supplies the unit's fetched comments
+ * (body + createdAt + authorLogin), Phoebe's own login, an optional extra
+ * external-activity instant (`extraActivityAt` — e.g. a PR head commit's
+ * committedDate), and `k`. Reset-on-activity fires when the newest external
+ * activity (a foreign comment or that extra instant) is strictly newer than the
+ * latest timeout marker, so a unit someone has touched since its last timeout
+ * starts counting afresh.
+ */
+export function decideTimeoutRecord(opts: {
+  comments: readonly { body: string; createdAt: string; authorLogin: string }[];
+  phoebeLogin: string;
+  extraActivityAt?: string | null;
+  k: number;
+}): { count: number; quarantine: boolean } {
+  const marker = latestTimeoutMarker(opts.comments);
+  const latestActivityAt = maxIso(
+    newestForeignCommentAt(opts.comments, opts.phoebeLogin),
+    opts.extraActivityAt ?? null,
+  );
+  const staleActivity =
+    marker !== null && latestActivityAt !== null && latestActivityAt > marker.createdAt;
+  const count = nextTimeoutCount(marker ? marker.n : null, staleActivity);
+  return { count, quarantine: shouldQuarantine(count, opts.k) };
+}
+
+/**
  * Whether a quarantined unit should be auto-un-stuck: someone changed the thing
  * that hung. A PR unit clears when its head SHA advanced past baseline; an issue
  * unit clears when its `lastEditedAt` is newer than baseline. A bare human

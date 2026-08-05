@@ -64,11 +64,14 @@ ref your config names, runs it, and keeps supervising it. Upgrading is an edit t
 `engine.ref` — no rebuild, no restart. (The deployment dir is bind-mounted as a
 directory, so an in-place edit or a `git pull` is picked up on the next poll.)
 
-**Multiple repos in one container.** You don't need one Phoebe per repo — run
-`phoebe add-repo <owner/repo>` per repo and the same container supervises each as
-a tenant (`repos/<owner>/<repo>/`), with a fleet-wide concurrency cap. Read
-[`docs/trust.md`](docs/trust.md) first: co-locating repos means co-locating them
-in one trust domain. See [`docs/configuration.md`](docs/configuration.md) and
+**Multiple repos in one container.** You don't need one Phoebe per repo — either
+run `phoebe add-repo <owner/repo>` so tenants live under `repos/<owner>/<repo>/`
+(nested), or run at a workspace root whose child repos are linked as
+submodules (`phoebe init --workspace` / `init --tenant`; see
+[`docs/workspace.md`](docs/workspace.md)). Same fleet supervisor and concurrency
+cap either way. Read [`docs/trust.md`](docs/trust.md) first: co-locating repos
+means co-locating them in one trust domain. See
+[`docs/configuration.md`](docs/configuration.md) and
 [`docs/operating.md`](docs/operating.md).
 
 The full, execute-top-to-bottom version — prerequisites, secrets, verification —
@@ -123,6 +126,7 @@ Docs live under [`docs/`](docs/):
 
 - [`docs/architecture.md`](docs/architecture.md) — topology, worktree isolation, engine updates and crash-loop fallback, named volumes.
 - [`docs/configuration.md`](docs/configuration.md) — full config-field reference and env overlay.
+- [`docs/workspace.md`](docs/workspace.md) — workspace mode topology, two-tier `.env`, operator runbook (submodule children).
 - [`docs/work-kinds.md`](docs/work-kinds.md) — issues / conflicts / checks / reviews / research mechanics, PR-scan scope, poll loop.
 - [`docs/operating.md`](docs/operating.md) — controlling Phoebe as a human (labels, drafts, watermarks).
 - [`docs/status-contract.md`](docs/status-contract.md) — the local `status-v2` snapshot and replayable `events-v1` outcome journal.

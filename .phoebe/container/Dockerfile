@@ -47,7 +47,15 @@ RUN useradd --create-home --shell /bin/bash --uid 10001 --user-group phoebe \
 # /root/.cache. Point it somewhere the unprivileged user owns instead — an
 # explicit path rather than $HOME/.cache so the failure mode (a read-only
 # COREPACK_HOME) is one named path to check, not a home-directory guess.
-ENV COREPACK_HOME=/opt/corepack
+#
+# COREPACK_ENABLE_DOWNLOAD_PROMPT=0: that first-use download otherwise stops to
+# ask "Do you want to continue? [Y/n]" on a TTY. The engine runs installCommand
+# non-interactively, so the prompt has no one to answer it and boot hangs. Off
+# means corepack fetches the pinned pnpm silently. (The version is still pinned
+# via package.json's `packageManager`, so this suppresses the confirmation, not
+# the pin — corepack won't fetch anything the repo hasn't already named.)
+ENV COREPACK_HOME=/opt/corepack \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable \
  && mkdir -p /opt/corepack \
  && chown phoebe:phoebe /opt/corepack
@@ -73,7 +81,7 @@ RUN set -eux; \
     echo "${cursor_sha}  /tmp/cursor-agent.tar.gz" | sha256sum -c -; \
     mkdir -p /opt/cursor-agent; \
     tar --strip-components=1 -xzf /tmp/cursor-agent.tar.gz -C /opt/cursor-agent; \
-    chmod 0711 /opt/cursor-agent/cursor-agent; \
+    chmod 0711 /opt/cursor-agent/node; \
     rm /tmp/cursor-agent.tar.gz; \
     ln -s /opt/cursor-agent/cursor-agent /usr/local/bin/agent; \
     ln -s /opt/cursor-agent/cursor-agent /usr/local/bin/cursor-agent

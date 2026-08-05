@@ -147,7 +147,7 @@ describe("observerEngineEnv", () => {
       PHOEBE_RUNNING_ENGINE_REF: "main",
       PHOEBE_RUNNING_ENGINE_SHA: "last-good-sha",
       PHOEBE_QUARANTINED_ENGINE_SHA: "bad-sha",
-      PHOEBE_BOOTSTRAP_VERSION: "0.1.1",
+      PHOEBE_BOOTSTRAP_VERSION: "0.2.0",
     });
   });
 });

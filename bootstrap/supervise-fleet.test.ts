@@ -6,7 +6,7 @@
 import { describe, expect, test } from "vite-plus/test";
 import type { EngineExit, LaunchedEngine } from "./reconcile.ts";
 import type { DiscoveredTenant, TenantSample } from "./tenants.ts";
-import { superviseFleet, type FleetChild } from "./supervise-fleet.ts";
+import { superviseFleet, type DrainTimer, type FleetChild } from "./supervise-fleet.ts";
 
 function tenant(slug: string): DiscoveredTenant {
   return {
@@ -40,6 +40,51 @@ function fakeChild(): { child: FleetChild; kills: string[]; exit: (e?: EngineExi
       exited,
     },
     exit: (e = { code: 0, signal: null }) => settle(e),
+  };
+}
+
+// A child that ignores SIGTERM — its work unit never finishes — so `exited`
+// only settles once it is SIGKILLed. Exercises the drain escalation (#79).
+function stubbornChild(): { child: FleetChild; kills: string[] } {
+  const kills: string[] = [];
+  let settle!: (e: EngineExit) => void;
+  const exited = new Promise<EngineExit>((resolve) => {
+    settle = resolve;
+  });
+  return {
+    kills,
+    child: {
+      kill: (signal) => {
+        kills.push(signal);
+        if (signal === "SIGKILL") settle({ code: null, signal: "SIGKILL" });
+      },
+      exited,
+    },
+  };
+}
+
+// A gated cancelable timer standing in for the drain grace: nothing fires until
+// `fireAll`, and a canceled timer stays quiet — so a test drives the escalation.
+function gatedTimers(): { make: DrainTimer; fireAll: () => void; canceledCount: () => number } {
+  const pending: Array<{ resolve: () => void; canceled: boolean }> = [];
+  return {
+    make: (_ms: number) => {
+      const entry = { resolve: () => {}, canceled: false };
+      const expired = new Promise<void>((resolve) => {
+        entry.resolve = resolve;
+      });
+      pending.push(entry);
+      return {
+        expired,
+        cancel: () => {
+          entry.canceled = true;
+        },
+      };
+    },
+    fireAll: () => {
+      for (const entry of pending) if (!entry.canceled) entry.resolve();
+    },
+    canceledCount: () => pending.filter((e) => e.canceled).length,
   };
 }
 
@@ -209,6 +254,63 @@ describe("superviseFleet", () => {
     expect(h.spawned).toHaveLength(2);
   });
 
+  test("a hold id keeps a missing sample from draining (#86/#91)", async () => {
+    const clock = gatedClock();
+    const engineState = { config: "1:1", remoteSha: "a".repeat(40) };
+    let samples: TenantSample[] = [sample("acme/widget", "fp1"), sample("acme/gadget", "fp1")];
+    let hold: string[] = [];
+    const spawned: Array<{ slug: string | null; fake: ReturnType<typeof fakeChild> }> = [];
+    let stopRequested = false;
+
+    const result = superviseFleet({
+      intervalMs: 1000,
+      crashBackoffMs: 500,
+      launch: () => ({
+        entry: "/data/engine/src/cli.ts",
+        sha: engineState.remoteSha,
+        config: engineState.config,
+        quarantinedSha: null,
+        guarded: true,
+        sample: () => ({ config: engineState.config, remoteSha: engineState.remoteSha }),
+      }),
+      discover: () => ({ samples, hold }),
+      spawn: (t) => {
+        const fake = fakeChild();
+        spawned.push({ slug: t.slug, fake });
+        return fake.child;
+      },
+      stop: {
+        get requested() {
+          return stopRequested;
+        },
+        wait: clock.wait,
+      },
+    });
+
+    await settle();
+    expect(spawned).toHaveLength(2);
+    const gadgetDir = tenant("acme/gadget").id;
+
+    // Mid-rewrite: gadget disappears from samples but is marked held.
+    samples = [sample("acme/widget", "fp1")];
+    hold = [gadgetDir];
+    clock.tick();
+    await settle();
+    const gadget = spawned.find((s) => s.slug === "acme/gadget")!;
+    expect(gadget.fake.kills).toEqual([]);
+
+    // Dir genuinely gone → drain.
+    hold = [];
+    clock.tick();
+    await settle();
+    expect(gadget.fake.kills).toContain("SIGTERM");
+
+    stopRequested = true;
+    clock.tick();
+    for (const s of spawned) s.fake.exit();
+    await result;
+  });
+
   test("respawns a child that died on its own (per-tenant supervision)", async () => {
     const h = harness([sample("acme/widget", "fp1")]);
     await settle();
@@ -232,5 +334,93 @@ describe("superviseFleet", () => {
     const exit = await h.result;
     expect(exit).toEqual({ code: 0, signal: null });
     for (const s of all) expect(s.fake.kills).toContain("SIGTERM");
+  });
+
+  test("SIGKILLs a child that ignores SIGTERM after the drain grace (#79)", async () => {
+    const clock = gatedClock();
+    const timers = gatedTimers();
+    const stubborn = stubbornChild();
+    const reaped: string[] = [];
+    let stopRequested = false;
+
+    const result = superviseFleet({
+      intervalMs: 1000,
+      drainTimer: timers.make,
+      launch: () => ({
+        entry: "/data/engine/src/cli.ts",
+        sha: "a".repeat(40),
+        config: "1:1",
+        quarantinedSha: null,
+        guarded: true,
+        sample: () => ({ config: "1:1", remoteSha: "a".repeat(40) }),
+      }),
+      discover: () => [sample("acme/widget", "fp1")],
+      spawn: () => stubborn.child,
+      onReap: (id) => reaped.push(id),
+      stop: {
+        get requested() {
+          return stopRequested;
+        },
+        wait: clock.wait,
+      },
+    });
+
+    await settle();
+    expect(stubborn.kills).toEqual([]);
+
+    // Container stop → drainAll → drain sends SIGTERM, which this child ignores.
+    stopRequested = true;
+    clock.tick();
+    await settle();
+    expect(stubborn.kills).toEqual(["SIGTERM"]); // still waiting on the grace
+
+    // The grace elapses → escalate to SIGKILL, which brings it down and lets
+    // drain (and drainAll, and the supervisor) complete.
+    timers.fireAll();
+    const exit = await result;
+    expect(exit).toEqual({ code: 0, signal: null });
+    expect(stubborn.kills).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(reaped).toEqual([tenant("acme/widget").id]); // onReap still fires after kill
+  });
+
+  test("a graceful drain cancels the grace timer and never SIGKILLs (#79)", async () => {
+    const clock = gatedClock();
+    const timers = gatedTimers();
+    const spawned: Array<ReturnType<typeof fakeChild>> = [];
+    let stopRequested = false;
+
+    const result = superviseFleet({
+      intervalMs: 1000,
+      drainTimer: timers.make,
+      launch: () => ({
+        entry: "/data/engine/src/cli.ts",
+        sha: "a".repeat(40),
+        config: "1:1",
+        quarantinedSha: null,
+        guarded: true,
+        sample: () => ({ config: "1:1", remoteSha: "a".repeat(40) }),
+      }),
+      discover: () => [sample("acme/widget", "fp1")],
+      spawn: () => {
+        const fake = fakeChild();
+        spawned.push(fake);
+        return fake.child;
+      },
+      stop: {
+        get requested() {
+          return stopRequested;
+        },
+        wait: clock.wait,
+      },
+    });
+
+    await settle();
+    stopRequested = true;
+    clock.tick();
+    // A well-behaved child settles its exit on SIGTERM (fakeChild does).
+    const exit = await result;
+    expect(exit).toEqual({ code: 0, signal: null });
+    expect(spawned[0]!.kills).toEqual(["SIGTERM"]); // no SIGKILL
+    expect(timers.canceledCount()).toBe(1); // grace timer was canceled, not left pending
   });
 });

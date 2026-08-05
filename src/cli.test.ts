@@ -1,7 +1,8 @@
 // Argv parsing contract for the `phoebe` bin: `--config`/`-c` (with space or
 // `=`), `--help`/`-h`, and everything else forwarded to `runEngine` for the
-// engine to interpret. The full CLI is exercised at the smoke-test level in
-// dev; here we just pin the surface.
+// engine to interpret. Init flags (`--workspace` / `--tenant`) are mutually
+// exclusive profile selectors. The full CLI is exercised at the smoke-test
+// level in dev; here we just pin the surface.
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -76,16 +77,100 @@ describe("parseCliArgs", () => {
 });
 
 describe("parseInitArgs", () => {
-  test("defaults to current directory when no positional given", () => {
-    expect(parseInitArgs([])).toEqual({ targetDir: ".", help: false });
+  test("defaults to current directory and flat profile when no args given", () => {
+    expect(parseInitArgs([])).toEqual({
+      targetDir: ".",
+      help: false,
+      profile: "flat",
+      withPrompts: false,
+    });
   });
 
-  test("accepts a positional target directory", () => {
-    expect(parseInitArgs(["./my-agent"])).toEqual({ targetDir: "./my-agent", help: false });
+  test("accepts a positional target directory (flat)", () => {
+    expect(parseInitArgs(["./my-agent"])).toEqual({
+      targetDir: "./my-agent",
+      help: false,
+      profile: "flat",
+      withPrompts: false,
+    });
+  });
+
+  test("accepts --workspace with an optional directory", () => {
+    expect(parseInitArgs(["--workspace"])).toEqual({
+      targetDir: ".",
+      help: false,
+      profile: "workspace",
+      withPrompts: false,
+    });
+    expect(parseInitArgs(["--workspace", "./ws"])).toEqual({
+      targetDir: "./ws",
+      help: false,
+      profile: "workspace",
+      withPrompts: false,
+    });
+    expect(parseInitArgs(["./ws", "--workspace"])).toEqual({
+      targetDir: "./ws",
+      help: false,
+      profile: "workspace",
+      withPrompts: false,
+    });
+  });
+
+  test("accepts --tenant with an optional directory", () => {
+    expect(parseInitArgs(["--tenant", "./child"])).toEqual({
+      targetDir: "./child",
+      help: false,
+      profile: "tenant",
+      withPrompts: false,
+    });
+  });
+
+  test("accepts tenant overrides --slug / --url / --with-prompts", () => {
+    expect(
+      parseInitArgs([
+        "--tenant",
+        "./child",
+        "--slug",
+        "acme/widget",
+        "--url",
+        "git@example.com:acme/widget.git",
+        "--with-prompts",
+      ]),
+    ).toEqual({
+      targetDir: "./child",
+      help: false,
+      profile: "tenant",
+      repoSlug: "acme/widget",
+      repoUrl: "git@example.com:acme/widget.git",
+      withPrompts: true,
+    });
+    expect(parseInitArgs(["--tenant", "--slug=acme/x", "--url=https://e/x.git"])).toEqual({
+      targetDir: ".",
+      help: false,
+      profile: "tenant",
+      repoSlug: "acme/x",
+      repoUrl: "https://e/x.git",
+      withPrompts: false,
+    });
+  });
+
+  test("rejects tenant-only flags without --tenant", () => {
+    expect(() => parseInitArgs(["--slug", "a/b"])).toThrow(/only valid with/);
+    expect(() => parseInitArgs(["--workspace", "--with-prompts"])).toThrow(/only valid with/);
+  });
+
+  test("--workspace and --tenant are mutually exclusive", () => {
+    expect(() => parseInitArgs(["--workspace", "--tenant"])).toThrow(/mutually exclusive/);
+    expect(() => parseInitArgs(["--tenant", "--workspace", "./x"])).toThrow(/mutually exclusive/);
   });
 
   test("--help / -h set help without requiring a directory", () => {
-    expect(parseInitArgs(["--help"])).toEqual({ targetDir: ".", help: true });
+    expect(parseInitArgs(["--help"])).toEqual({
+      targetDir: ".",
+      help: true,
+      profile: "flat",
+      withPrompts: false,
+    });
     expect(parseInitArgs(["-h"]).help).toBe(true);
   });
 

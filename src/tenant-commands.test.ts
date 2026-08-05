@@ -4,7 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vite-plus/test";
 import { STATUS_SNAPSHOT_FILE } from "./status-store.ts";
 import {
@@ -17,6 +17,8 @@ import {
   readFlatRepoFields,
   removeRepo,
   renderTenantConfig,
+  slugFromRemoteUrl,
+  stripUrlCredentials,
 } from "./tenant-commands.ts";
 
 const MINIMAL_STATUS_V2 = {
@@ -68,7 +70,7 @@ afterEach(() => {
   rmSync(dataBase, { recursive: true, force: true });
 });
 
-describe("parseSlug / defaultRepoUrl", () => {
+describe("parseSlug / defaultRepoUrl / slugFromRemoteUrl", () => {
   test("splits a valid slug", () => {
     expect(parseSlug("acme/widget")).toEqual({ owner: "acme", repo: "widget" });
   });
@@ -88,6 +90,36 @@ describe("parseSlug / defaultRepoUrl", () => {
   });
   test("derives the GitHub HTTPS url", () => {
     expect(defaultRepoUrl("acme/widget")).toBe("https://github.com/acme/widget.git");
+  });
+  test("slugFromRemoteUrl extracts owner/repo from common remote forms", () => {
+    expect(slugFromRemoteUrl("https://github.com/acme/widget.git")).toBe("acme/widget");
+    expect(slugFromRemoteUrl("git@github.com:acme/widget.git")).toBe("acme/widget");
+  });
+  test("slugFromRemoteUrl accepts scp remotes with a non-`git` username", () => {
+    expect(slugFromRemoteUrl("deploy@git.example.com:acme/widget.git")).toBe("acme/widget");
+  });
+  test("slugFromRemoteUrl tolerates a terminal slash after `.git`", () => {
+    expect(slugFromRemoteUrl("https://github.com/acme/widget.git/")).toBe("acme/widget");
+    expect(slugFromRemoteUrl("git@github.com:acme/widget.git/")).toBe("acme/widget");
+  });
+});
+
+describe("stripUrlCredentials", () => {
+  test("removes userinfo from http(s) URLs so tokens never persist", () => {
+    expect(stripUrlCredentials("https://x-access-token:ghs_tok@github.com/acme/widget.git")).toBe(
+      "https://github.com/acme/widget.git",
+    );
+    expect(stripUrlCredentials("https://user:pw@github.com/acme/widget.git")).toBe(
+      "https://github.com/acme/widget.git",
+    );
+  });
+  test("leaves credential-free https and ssh remotes unchanged", () => {
+    expect(stripUrlCredentials("https://github.com/acme/widget.git")).toBe(
+      "https://github.com/acme/widget.git",
+    );
+    expect(stripUrlCredentials("git@github.com:acme/widget.git")).toBe(
+      "git@github.com:acme/widget.git",
+    );
   });
 });
 
@@ -166,14 +198,14 @@ describe("removeRepo", () => {
 });
 
 describe("listTenants", () => {
-  test("reports config/env/retained-data per tenant, sorted", () => {
+  test("reports config/env/retained-data per tenant, sorted", async () => {
     addRepo({ configDir, slug: "acme/widget" });
     addRepo({ configDir, slug: "acme/gadget" });
     // widget has a real .env and retained /data; gadget has neither.
     writeFileSync(join(configDir, "repos", "acme", "widget", ".env"), "GH_TOKEN=x");
     mkdirSync(join(dataBase, "acme", "widget"), { recursive: true });
 
-    const listings = listTenants({ configDir, dataBase });
+    const listings = await listTenants({ configDir, dataBase });
     expect(listings.map((l) => l.slug)).toEqual(["acme/gadget", "acme/widget"]);
     const widget = listings.find((l) => l.slug === "acme/widget")!;
     expect(widget).toMatchObject({ configValid: true, envPresent: true, retainedData: true });
@@ -181,7 +213,7 @@ describe("listTenants", () => {
     expect(gadget).toMatchObject({ envPresent: false, retainedData: false });
   });
 
-  test("reads status.json when present", () => {
+  test("reads status.json when present", async () => {
     addRepo({ configDir, slug: "acme/widget" });
     const stateDir = join(dataBase, "acme", "widget", "state");
     mkdirSync(stateDir, { recursive: true });
@@ -189,15 +221,87 @@ describe("listTenants", () => {
       join(stateDir, "status.json"),
       JSON.stringify({ tenant: "acme/widget", currentUnit: { kind: "issues", id: "5" } }),
     );
-    const [widget] = listTenants({ configDir, dataBase });
+    const [widget] = await listTenants({ configDir, dataBase });
     expect(widget?.status?.currentUnit).toEqual({ kind: "issues", id: "5" });
   });
 
-  test("empty when there is no repos/ dir", () => {
-    expect(listTenants({ configDir, dataBase })).toEqual([]);
+  test("empty when there is no repos/ dir", async () => {
+    expect(await listTenants({ configDir, dataBase })).toEqual([]);
   });
 
-  test("surfaces the status-v2 queue lookahead when present", () => {
+  test("workspace mode lists valid + broken + env-less children with health columns", async () => {
+    // Root declares workspace mode (#83); children live as siblings of the root
+    // config (not under repos/). Valid child has status + .env; env-less is
+    // config-ok without secrets; broken fails loadRepoSlug → configValid false.
+    writeFileSync(
+      join(configDir, "phoebe.config.ts"),
+      `export default { workspace: { depth: 1 }, engine: { source: "local" } };\n`,
+    );
+    mkdirSync(join(configDir, "valid"), { recursive: true });
+    mkdirSync(join(configDir, "envless"), { recursive: true });
+    mkdirSync(join(configDir, "broken"), { recursive: true });
+    writeFileSync(join(configDir, "valid", "phoebe.config.ts"), "export default {};\n");
+    writeFileSync(join(configDir, "envless", "phoebe.config.ts"), "export default {};\n");
+    writeFileSync(join(configDir, "broken", "phoebe.config.ts"), "export default {};\n");
+    writeFileSync(join(configDir, "valid", ".env"), "GH_TOKEN=x\n");
+    const stateDir = join(dataBase, "acme", "valid", "state");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      join(stateDir, "status.json"),
+      JSON.stringify({ tenant: "acme/valid", currentUnit: { kind: "issues", id: "9" } }),
+    );
+
+    const listings = await listTenants({
+      configDir,
+      dataBase,
+      loadRepoSlug: (path) => {
+        const child = basename(dirname(path));
+        if (child === "broken") throw new Error("parse failure");
+        if (child === "valid") return "acme/valid";
+        if (child === "envless") return "acme/envless";
+        throw new Error(`unexpected path ${path}`);
+      },
+    });
+
+    expect(listings.map((l) => l.slug)).toEqual(["acme/envless", "acme/valid", "broken"]);
+    expect(listings.find((l) => l.slug === "acme/valid")).toMatchObject({
+      configValid: true,
+      envPresent: true,
+      retainedData: true,
+    });
+    expect(listings.find((l) => l.slug === "acme/valid")?.status?.currentUnit).toEqual({
+      kind: "issues",
+      id: "9",
+    });
+    expect(listings.find((l) => l.slug === "acme/envless")).toMatchObject({
+      configValid: true,
+      envPresent: false,
+      retainedData: false,
+      status: null,
+    });
+    expect(listings.find((l) => l.slug === "broken")).toMatchObject({
+      configValid: false,
+      envPresent: false,
+      retainedData: false,
+      status: null,
+    });
+  });
+
+  test("workspace block wins over a co-present repos/ tree (list ignores nested)", async () => {
+    writeFileSync(join(configDir, "phoebe.config.ts"), `export default { workspace: {} };\n`);
+    addRepo({ configDir, slug: "acme/nested-only" });
+    mkdirSync(join(configDir, "child"), { recursive: true });
+    writeFileSync(join(configDir, "child", "phoebe.config.ts"), "export default {};\n");
+
+    const listings = await listTenants({
+      configDir,
+      dataBase,
+      loadRepoSlug: () => "acme/child",
+    });
+    expect(listings.map((l) => l.slug)).toEqual(["acme/child"]);
+  });
+
+  test("surfaces the status-v2 queue lookahead when present", async () => {
     addRepo({ configDir, slug: "acme/widget" });
     const stateDir = join(dataBase, "acme", "widget", "state");
     mkdirSync(stateDir, { recursive: true });
@@ -211,16 +315,16 @@ describe("listTenants", () => {
         ],
       }),
     );
-    const [widget] = listTenants({ configDir, dataBase });
+    const [widget] = await listTenants({ configDir, dataBase });
     expect(widget?.queue).toEqual([
       { issueNumber: 100, blockedBy: [], workable: true },
       { issueNumber: 103, blockedBy: [100, 101], workable: false },
     ]);
   });
 
-  test("defaults to an empty queue when no status-v2 snapshot exists yet", () => {
+  test("defaults to an empty queue when no status-v2 snapshot exists yet", async () => {
     addRepo({ configDir, slug: "acme/widget" });
-    const [widget] = listTenants({ configDir, dataBase });
+    const [widget] = await listTenants({ configDir, dataBase });
     expect(widget?.queue).toEqual([]);
   });
 });

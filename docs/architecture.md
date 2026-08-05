@@ -59,8 +59,12 @@ first three are defaulted in `config.paths`):
 | `phoebe-state`     | `/data/state`     | `paths.stateDir`     | Lock, watermarks, crash-loop state, logs.                        |
 | `phoebe-engine`    | `/data/engine`    | `PHOEBE_ENGINE_DIR`  | Engine checkouts, so a restart re-fetches instead of re-cloning. |
 
-The consumer's `phoebe.config.ts` and `prompts/` are mounted **read-only** into
-`/etc/phoebe`, so `phoebe boot` re-reads config edits without a rebuild.
+The consumer's deployment directory (config, optional `prompts/`, and in
+multi-tenant layouts the whole tenant tree) is mounted **read-only** into
+`/etc/phoebe`, so `phoebe boot` re-reads config edits without a rebuild. Nested
+(`repos/`) and workspace (linked children) both use that directory mount; see
+[`workspace.md`](workspace.md) for workspace topology and the submodule
+runbook.
 
 All four mount points are created and chowned to the unprivileged `phoebe` user
 **in the image**, because Docker seeds a fresh named volume from the image's

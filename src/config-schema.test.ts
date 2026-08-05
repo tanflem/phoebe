@@ -140,6 +140,30 @@ describe("validateUserConfig", () => {
       ),
     ).toThrow(/issueSource\.readyLabel/);
   });
+
+  test("accepts a workspace block with omitted depth (bootstrap defaults to 1)", () => {
+    expect(() => validateUserConfig(minimalUserConfig({ workspace: {} }))).not.toThrow();
+  });
+
+  test("accepts a workspace block with an integer depth ≥ 1", () => {
+    expect(() => validateUserConfig(minimalUserConfig({ workspace: { depth: 1 } }))).not.toThrow();
+    expect(() => validateUserConfig(minimalUserConfig({ workspace: { depth: 3 } }))).not.toThrow();
+  });
+
+  test("rejects workspace.depth < 1", () => {
+    expect(() => validateUserConfig(minimalUserConfig({ workspace: { depth: 0 } }))).toThrow(
+      /workspace\.depth.*integer ≥ 1/i,
+    );
+    expect(() => validateUserConfig(minimalUserConfig({ workspace: { depth: -1 } }))).toThrow(
+      /workspace\.depth/i,
+    );
+  });
+
+  test("rejects non-integer workspace.depth", () => {
+    expect(() => validateUserConfig(minimalUserConfig({ workspace: { depth: 1.5 } }))).toThrow(
+      /workspace\.depth/i,
+    );
+  });
 });
 
 describe("resolveConfig", () => {
@@ -320,5 +344,34 @@ describe("resolveConfig", () => {
       expect(resolved.issueSource).toEqual({ repoSlug: "acme/planning", readyLabel: "triaged" });
       expect(resolved.readyLabel).toBe("green-light");
     });
+  });
+
+  test("round-trips a config carrying bootstrapper-only engine + workspace fields", () => {
+    // Type-level: assigning these on PhoebeUserConfig must compile. Runtime:
+    // resolveConfig accepts the user shape and still produces a full engine config.
+    const user: PhoebeUserConfig = minimalUserConfig({
+      engine: { source: "github", ref: "v0.1.0" },
+      workspace: { depth: 2 },
+    });
+    const resolved = resolveConfig(user);
+    expect(resolved.repoSlug).toBe("acme/widget");
+    expect(resolved.defaultBranch).toBe(CONFIG_DEFAULTS.defaultBranch);
+    expect(resolved.paths.repoDir).toBe("/data/repos/acme/widget/repo");
+  });
+
+  test("drops bootstrapper-only engine and workspace from the engine-facing shape", () => {
+    // Mirrors how `engine` is never on PhoebeConfig: both fields are accepted
+    // on the user config so consumers type-check, then discarded by construction.
+    const resolved = resolveConfig(
+      minimalUserConfig({
+        engine: { source: "local" },
+        workspace: { depth: 2 },
+      }),
+    );
+    expect(resolved).not.toHaveProperty("engine");
+    expect(resolved).not.toHaveProperty("workspace");
+    // A spread snapshot of keys must not sneak them back in under any alias.
+    expect(Object.keys(resolved).sort()).not.toContain("engine");
+    expect(Object.keys(resolved).sort()).not.toContain("workspace");
   });
 });

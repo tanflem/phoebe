@@ -21,4 +21,5 @@ export type {
   PathsConfig,
   PromptFilesConfig,
   ProviderName,
+  WorkspaceField,
 } from "../src/config-schema.ts";
