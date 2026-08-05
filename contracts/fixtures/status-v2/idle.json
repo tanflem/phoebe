@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "status-v1",
+  "schemaVersion": "status-v2",
   "updatedAt": "2026-07-30T12:00:00.000Z",
   "runtime": {
     "runtimeId": "runtime-1",
@@ -19,9 +19,10 @@
     "prompts": "sha256:prompts",
     "providerModel": "sha256:provider-model"
   },
-  "capabilities": ["status-v1", "events-v1", "events-replay-v1", "events-range-v1"],
+  "capabilities": ["status-v2", "events-v1", "events-replay-v1", "events-range-v1"],
   "lifecycle": { "state": "idle", "reason": "No work this cycle." },
   "activeWork": null,
+  "queue": [],
   "lastSuccess": null,
   "lastFailure": null,
   "control": {

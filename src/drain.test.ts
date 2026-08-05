@@ -5,7 +5,7 @@
 
 import { EventEmitter } from "node:events";
 import { describe, expect, test } from "vite-plus/test";
-import { installDrainSignal } from "./drain.ts";
+import { installDrainSignal, REF_CHANGE_DRAIN_SIGNAL } from "./drain.ts";
 
 describe("installDrainSignal", () => {
   test("starts un-requested", () => {
@@ -37,6 +37,38 @@ describe("installDrainSignal", () => {
     const drain = installDrainSignal(emitter, ["SIGTERM", "SIGINT"]);
     emitter.emit("SIGINT");
     expect(drain.requested).toBe(true);
+    drain.dispose();
+  });
+
+  test("starts with no signal recorded", () => {
+    const emitter = new EventEmitter();
+    const drain = installDrainSignal(emitter, ["SIGTERM"]);
+    expect(drain.signal).toBeNull();
+    drain.dispose();
+  });
+
+  test("records which signal triggered the drain", () => {
+    const emitter = new EventEmitter();
+    const drain = installDrainSignal(emitter, ["SIGTERM", REF_CHANGE_DRAIN_SIGNAL]);
+    emitter.emit(REF_CHANGE_DRAIN_SIGNAL);
+    expect(drain.signal).toBe(REF_CHANGE_DRAIN_SIGNAL);
+    drain.dispose();
+  });
+
+  test("distinguishes a container stop from a ref-change reload", () => {
+    const emitter = new EventEmitter();
+    const drain = installDrainSignal(emitter, ["SIGTERM", REF_CHANGE_DRAIN_SIGNAL]);
+    emitter.emit("SIGTERM");
+    expect(drain.signal).toBe("SIGTERM");
+    drain.dispose();
+  });
+
+  test("the first signal wins — a later one does not overwrite it", () => {
+    const emitter = new EventEmitter();
+    const drain = installDrainSignal(emitter, ["SIGTERM", REF_CHANGE_DRAIN_SIGNAL]);
+    emitter.emit(REF_CHANGE_DRAIN_SIGNAL);
+    emitter.emit("SIGTERM");
+    expect(drain.signal).toBe(REF_CHANGE_DRAIN_SIGNAL);
     drain.dispose();
   });
 
@@ -72,6 +104,14 @@ describe("installDrainSignal", () => {
     const drain = installDrainSignal(emitter, ["SIGTERM"]);
     drain.dispose();
     emitter.emit("SIGTERM");
+    expect(drain.requested).toBe(false);
+  });
+
+  test("dispose removes every configured signal's listener, not just the first", () => {
+    const emitter = new EventEmitter();
+    const drain = installDrainSignal(emitter, ["SIGTERM", REF_CHANGE_DRAIN_SIGNAL]);
+    drain.dispose();
+    emitter.emit(REF_CHANGE_DRAIN_SIGNAL);
     expect(drain.requested).toBe(false);
   });
 

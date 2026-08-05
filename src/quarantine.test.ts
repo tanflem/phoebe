@@ -72,6 +72,35 @@ describe("markers", () => {
     expect(comment).toContain("produced no commit 3 times");
     expect(comment).toContain("mergeable-conflicting");
   });
+
+  test("escalation comment names the blocked dependents for the issue-keyed no-PR trigger (#22)", () => {
+    const comment = buildQuarantineComment({
+      kind: "issues",
+      id: 784,
+      k: 3,
+      baseline: "2026-08-01T00:00:00Z",
+      reason: "was claimed and released with no PR",
+      signature: "apply-patch-failed",
+      dependents: [763, 700],
+    });
+    expect(comment).toContain("was claimed and released with no PR 3 times");
+    expect(comment).toContain("apply-patch-failed");
+    expect(comment).toContain("#763");
+    expect(comment).toContain("#700");
+  });
+
+  test("escalation comment omits the dependents line when there are none", () => {
+    const comment = buildQuarantineComment({
+      kind: "issues",
+      id: 784,
+      k: 3,
+      baseline: "2026-08-01T00:00:00Z",
+      reason: "was claimed and released with no PR",
+      signature: "apply-patch-failed",
+      dependents: [],
+    });
+    expect(comment).not.toContain("keeps");
+  });
 });
 
 describe("count + quarantine decisions", () => {
@@ -266,6 +295,70 @@ describe("planUnitAttempt", () => {
     });
     expect(plan.marker.n).toBe(1);
     expect(plan.quarantined).toBe(false);
+  });
+});
+
+describe("planUnitAttempt reused for the issue-keyed no-PR trigger (#22)", () => {
+  // An issue-keyed unit has no in-progress ref to stale-check against, so the
+  // caller (main.ts's recordFailedIssueAttempt) passes a constant `ref` — the
+  // issue number — across every attempt, and resets by dropping the marker
+  // (previous: null) the moment a run produces a PR, rather than relying on
+  // `ref` advancing.
+  test("consecutive no-PR claims with a constant ref count up and quarantine at K", () => {
+    const first = planUnitAttempt({
+      previous: null,
+      ref: "784",
+      signature: "apply-patch-failed",
+      now: "2026-08-04T10:00:00.000Z",
+      k: 3,
+    });
+    expect(first.marker.n).toBe(1);
+    expect(first.quarantined).toBe(false);
+
+    const second = planUnitAttempt({
+      previous: first.marker,
+      ref: "784",
+      signature: "apply-patch-failed",
+      now: "2026-08-04T11:00:00.000Z",
+      k: 3,
+    });
+    expect(second.marker.n).toBe(2);
+    expect(second.quarantined).toBe(false);
+
+    const third = planUnitAttempt({
+      previous: second.marker,
+      ref: "784",
+      signature: "apply-patch-failed",
+      now: "2026-08-04T12:00:00.000Z",
+      k: 3,
+    });
+    expect(third.marker.n).toBe(3);
+    expect(third.quarantined).toBe(true);
+  });
+
+  test("a claim that produced a PR resets the counter — a slow-but-progressing unit is never quarantined", () => {
+    // Two no-PR claims, then a successful one clears the tracking comment
+    // (main.ts's resetIssueAttemptCounter), so the next failure starts at 1
+    // instead of continuing from 3.
+    const afterTwoFailures: { n: number; signature: string; ref: string; at: string } = {
+      n: 2,
+      signature: "apply-patch-failed",
+      ref: "784",
+      at: "2026-08-04T11:00:00.000Z",
+    };
+    expect(shouldQuarantine(afterTwoFailures.n, 3)).toBe(false);
+
+    // The reset drops the marker entirely — the next failed attempt reads no
+    // prior marker, exactly like `previous: null` above.
+    const afterReset = planUnitAttempt({
+      previous: null,
+      ref: "784",
+      signature: "apply-patch-failed",
+      now: "2026-08-04T13:00:00.000Z",
+      k: 3,
+    });
+    expect(afterReset.marker.n).toBe(1);
+    expect(afterReset.quarantined).toBe(false);
   });
 });
 

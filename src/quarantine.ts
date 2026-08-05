@@ -27,6 +27,18 @@
 // counting rule — but is a distinct counter/config knob (`maxUnitAttempts`),
 // since "hung" and "fails fast with no commit" are different failure shapes
 // worth tuning independently.
+//
+// #22 is the issue-keyed sibling of #25's trigger: a claim→release cycle
+// (issues/research) that fails verification and produces no `<branchPrefix>issue-<n>`
+// branch/PR is the same "fails fast, never hangs" shape #75's timeout counter
+// misses. It reuses `UnitAttemptMarker`/`planUnitAttempt`/`buildUnitAttemptMarker`
+// as-is, kind-scoped by `"issues"`/`"research"` and the same `maxUnitAttempts`
+// knob — but `ref` is the issue number (constant across attempts) rather than
+// a moving head SHA, since an issue-keyed unit has no in-progress ref to
+// stale-check against: the caller resets the counter explicitly the moment a
+// run produces a PR, instead of inferring progress from `ref` advancing.
+// `buildQuarantineComment`'s optional `dependents` list is this trigger's one
+// addition — the other issues left stuck behind a quarantined blocker.
 
 import type { Sha } from "./branded.ts";
 
@@ -59,12 +71,13 @@ export function resolveMaxUnitTimeouts(
   return resolveThreshold(env["PHOEBE_MAX_UNIT_TIMEOUTS"], configValue, DEFAULT_MAX_UNIT_TIMEOUTS);
 }
 
-/** Consecutive no-commit attempts before quarantine (#25); the house number. */
+/** Consecutive no-progress attempts before quarantine (#25, #22); the house number. */
 export const DEFAULT_MAX_UNIT_ATTEMPTS = 3;
 
 /**
- * Resolve K for the no-commit-attempt trigger: `PHOEBE_MAX_UNIT_ATTEMPTS` wins,
- * else the config field, else the default 3.
+ * Resolve K for the no-progress-attempt trigger — no commit for a PR-keyed
+ * unit (#25) or no PR for an issue-keyed one (#22): `PHOEBE_MAX_UNIT_ATTEMPTS`
+ * wins, else the config field, else the default 3.
  */
 export function resolveMaxUnitAttempts(
   env: NodeJS.ProcessEnv,
@@ -114,13 +127,23 @@ export function buildQuarantineComment(opts: {
   reason: string;
   /** Last observed failure detail (#25) — carried so the cause is visible without container logs. */
   signature?: string;
+  /** Open issues blocked on this one (#22) — named so a stalled chain is visible without digging. */
+  dependents?: readonly number[];
 }): string {
   const detail = opts.signature ? ` Last failure: \`${opts.signature}\`.` : "";
+  const dependentsLine =
+    opts.dependents && opts.dependents.length > 0
+      ? [
+          "",
+          `This also keeps ${opts.dependents.map((n) => `#${n}`).join(", ")} blocked until it's resolved.`,
+        ]
+      : [];
   return [
     `⚠️ Phoebe quarantined this unit: the \`${opts.kind}\` work on #${opts.id} ${opts.reason} ` +
       `${opts.k} times in a row without completing.${detail} It has been labelled ` +
       `\`${PHOEBE_QUARANTINE_LABEL}\` and skipped so it stops burning the run budget. ` +
       `A human should take a look.`,
+    ...dependentsLine,
     "",
     `Remove the \`${PHOEBE_QUARANTINE_LABEL}\` label to retry, or push a fix / edit the ` +
       `issue — Phoebe auto-clears the label when the content advances past the baseline below.`,

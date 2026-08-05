@@ -67,15 +67,31 @@ The producer. Selection (`selectIssue`):
 **Base resolution** (`resolveWorktreeBase`) handles blockers:
 
 - `PHOEBE_BASE` set → use it verbatim (escape hatch, no blocker logic).
-- No `Blocked by #N` reference → base `origin/main`.
-- Blocked, blocker PR **open** → **stack** on `origin/<blocker branch>`; the
-  opened PR gets a ⛓️ banner warning not to merge before the blocker.
+- No blocker reference → base `origin/main`.
+- Blocked, blocker PR **open** → **stack** on `origin/<blocker branch>` (unless
+  `stackMode` is `off` — see below).
 - Blocked, blocker PR **merged** → base `origin/main` (blocker work is already
   in the base).
 - Blocked, blocker has **no** open or merged PR → **skip** this cycle.
 
-Blocker references are parsed with `blockedByPattern` (capture group 1 = blocker
-issue number).
+Blockers are discovered per `blockerSource`: `body` (default) parses
+`blockedByPattern` over the issue body text (capture group 1 = blocker issue
+number); `native` reads GitHub's issue-dependencies API instead; `both` unions
+and deduplicates the two.
+
+`stackMode` decides what a **stacked** result means for the PR (`resolveStackedPrPlan`):
+
+- `banner` (default) — today's behavior, unchanged. The PR is opened against
+  `defaultBranch` with a ⛓️ banner warning not to merge before the blocker;
+  maintenance flows catch the branch up to `main` as blockers merge.
+- `native` — the PR is opened against the blocker's branch instead and
+  registered into a true GitHub stacked PR via `gh stack link` (bottom-to-top),
+  so the diff shows only this issue's commits and GitHub owns retarget-on-merge.
+  No banner. Needs the `github/gh-stack` extension — see
+  [`configuration.md`](configuration.md#native-stacking-tooling).
+- `off` — never stacked. A blocker still gates the skip decision above, but the
+  branch is cut from `origin/main` and the PR opened against `defaultBranch`
+  with no banner.
 
 **Execution** (`runOneIssue`):
 

@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vite-plus/test";
+import { REF_CHANGE_DRAIN_SIGNAL } from "../src/drain.ts";
 import {
   configFingerprint,
   deploymentConfigFingerprint,
@@ -246,9 +247,11 @@ function harness(
     initialConfig?: string | null;
     launch?: (attempt: number) => Promise<LaunchedEngine> | LaunchedEngine;
     relaunchAfterExit?: (run: EngineRun) => boolean;
+    drainTimeoutMs?: number;
   } = {},
 ) {
   const clock = gatedClock();
+  const sleepClock = gatedClock();
   const state: WatchState & { sha: string | null } = {
     config: options.initialConfig ?? "1:2",
     remoteSha: SHA_A,
@@ -260,6 +263,7 @@ function harness(
   const relaunches: string[] = [];
   const runs: EngineRun[] = [];
   const ticks: number[] = [];
+  const drainTimeouts: string[] = [];
   let stopRequested = false;
   let attempt = 0;
   let clockMs = 0;
@@ -269,6 +273,9 @@ function harness(
     onRunEnd: (run) => runs.push(run),
     onRunTick: (tick) => ticks.push(tick.elapsedMs),
     relaunchAfterExit: (run) => options.relaunchAfterExit?.(run) ?? false,
+    ...(options.drainTimeoutMs !== undefined ? { drainTimeoutMs: options.drainTimeoutMs } : {}),
+    sleep: sleepClock.wait,
+    onDrainTimeout: (reason) => drainTimeouts.push(reason),
     launch: async () => {
       const n = attempt++;
       if (options.launch) return await options.launch(n);
@@ -307,7 +314,10 @@ function harness(
     relaunches,
     runs,
     ticks,
+    drainTimeouts,
     tick: clock.tick,
+    /** Fire the drain-timeout race independently of the poll clock. */
+    tickDrainTimeout: sleepClock.tick,
     /** Move the injected clock forward, so run durations are asserted exactly. */
     advance: (ms: number) => {
       clockMs += ms;
@@ -417,6 +427,9 @@ describe("superviseEngine", () => {
     h.state.sha = SHA_B;
     h.tick();
     await settle();
+    // A ref change gets a distinct signal from a plain container stop / config
+    // change, so the drained engine's own status snapshot can report why (#23).
+    expect(h.children[0]?.kills).toEqual([REF_CHANGE_DRAIN_SIGNAL]);
     h.children[0]?.exit();
     await settle();
 
@@ -425,6 +438,55 @@ describe("superviseEngine", () => {
 
     // The relaunched engine is on the new commit, so the watch goes quiet again.
     h.tick();
+    await settle();
+    expect(h.entries).toHaveLength(2);
+
+    h.requestStop();
+    await settle();
+    h.children[1]?.exit();
+    await h.result;
+  });
+
+  test("a reconcile-triggered drain that finishes well within its bound is not escalated", async () => {
+    const h = harness({ drainTimeoutMs: 60_000 });
+    await settle();
+
+    h.state.config = "9:9";
+    h.tick();
+    await settle();
+    h.children[0]?.exit();
+    await settle();
+
+    expect(h.children[0]?.kills).toEqual(["SIGTERM"]);
+    expect(h.drainTimeouts).toEqual([]);
+
+    h.requestStop();
+    await settle();
+    h.children[1]?.exit();
+    await h.result;
+  });
+
+  test("a reconcile-triggered drain that exceeds its bound escalates to SIGKILL", async () => {
+    // A wedged drain (stuck git push, hung process) must not block the upgrade
+    // forever — bound it and finish the job with SIGKILL (#23).
+    const h = harness({ drainTimeoutMs: 60_000 });
+    await settle();
+
+    h.state.remoteSha = SHA_B;
+    h.state.sha = SHA_B;
+    h.tick();
+    await settle();
+    expect(h.children[0]?.kills).toEqual([REF_CHANGE_DRAIN_SIGNAL]);
+
+    // The engine never exits on its own — the drain-timeout bound fires instead.
+    h.tickDrainTimeout();
+    await settle();
+
+    expect(h.drainTimeouts).toEqual(["ref"]);
+    expect(h.children[0]?.kills).toEqual([REF_CHANGE_DRAIN_SIGNAL, "SIGKILL"]);
+
+    // SIGKILL is what actually ends the run; the relaunch proceeds once it does.
+    h.children[0]?.exit({ code: null, signal: "SIGKILL" });
     await settle();
     expect(h.entries).toHaveLength(2);
 

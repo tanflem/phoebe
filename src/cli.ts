@@ -10,7 +10,7 @@
 //   phoebe config resolve --json
 //                       Print the canonical effective configuration and exit.
 //   phoebe status --json
-//                       Read the local status-v1 projection without starting
+//                       Read the local status-v2 projection without starting
 //                       work or contacting GitHub.
 //   phoebe [flags]      Run the engine. Loads the consumer's
 //                       `phoebe.config.ts`, overlays `PHOEBE_*` env vars,
@@ -220,7 +220,7 @@ Usage:
   phoebe list                      List tenants + health (in-container)
   phoebe purge <owner/repo> --yes  Wipe a removed tenant's data (in-container)
   phoebe config resolve --json     Print the canonical effective configuration
-  phoebe status --json             Read the local status-v1 projection
+  phoebe status --json             Read the local status-v2 projection
   phoebe [--config <path>] [flags] Run the engine
 
 Options (engine mode):
@@ -267,7 +267,7 @@ const STATUS_HELP_TEXT = `phoebe status — read the local runtime projection
 Usage:
   phoebe status --json [--config <path>]
 
-Reads paths.stateDir/status-v1.json without starting work or contacting GitHub.
+Reads paths.stateDir/status-v2.json without starting work or contacting GitHub.
 On success, stdout is the exact snapshot. Missing or corrupt data is represented
 as a stable JSON error object; unsupported major versions are explicit.
 `;
@@ -345,6 +345,23 @@ function runRemoveRepoCli(argv: readonly string[]): void {
   );
 }
 
+const QUEUE_LOOKAHEAD_LIMIT = 5;
+
+/** `#12, #34→#12, #56` — each issue number, with its blockers when it has any. */
+function formatQueueLookahead(queue: TenantListing["queue"]): string {
+  if (queue.length === 0) return "queue: (empty)";
+  const shown = queue
+    .slice(0, QUEUE_LOOKAHEAD_LIMIT)
+    .map((entry) =>
+      entry.blockedBy.length > 0
+        ? `#${entry.issueNumber}→${entry.blockedBy.map((b) => `#${b}`).join(",")}`
+        : `#${entry.issueNumber}`,
+    )
+    .join(", ");
+  const rest = queue.length - QUEUE_LOOKAHEAD_LIMIT;
+  return `queue: ${shown}${rest > 0 ? ` (+${rest} more)` : ""}`;
+}
+
 function formatTenantListing(listing: TenantListing): string {
   const flag = (label: string, on: boolean): string => `${on ? "✓" : "✗"} ${label}`;
   const unit = listing.status?.currentUnit;
@@ -352,7 +369,8 @@ function formatTenantListing(listing: TenantListing): string {
   return (
     `  ${listing.slug}\n` +
     `      ${flag("config", listing.configValid)}  ${flag("env", listing.envPresent)}  ` +
-    `${flag("data", listing.retainedData)}  ${state}`
+    `${flag("data", listing.retainedData)}  ${state}\n` +
+    `      ${formatQueueLookahead(listing.queue)}`
   );
 }
 

@@ -30,10 +30,24 @@
 // without processes or timers.
 
 import { statSync } from "node:fs";
+import { REF_CHANGE_DRAIN_SIGNAL } from "../src/drain.ts";
 import type { ResolvedEngineSource } from "./engine-source.ts";
 
 /** How often the watch samples the config and the tracked ref. */
 export const DEFAULT_RECONCILE_INTERVAL_MS = 60_000;
+
+/**
+ * How long a reconcile-triggered drain (config/ref change) gets before boot
+ * escalates to SIGKILL. Generous by design: it exists only to bound a *wedged*
+ * drain (a stuck git push, a hung process), not the normal "finish the unit"
+ * wait — that is already bounded by the engine's own whole-unit run timeout
+ * (`runTimeoutMs`, default 45 min, #72) plus its own SIGKILL escalation. This
+ * must stay comfortably above that so a healthy, still-working unit is never
+ * cut off mid-drain (#23's own acceptance: a ref change must not interrupt the
+ * unit in flight). Coordinates with JesusFilm/phoebe#79, which bounds the
+ * nested-fleet drain (bootstrap/supervise-fleet.ts) the same way.
+ */
+export const DEFAULT_RECONCILE_DRAIN_TIMEOUT_MS = 60 * 60_000;
 
 /**
  * How long boot waits before relaunching an engine that crashed. Long enough
@@ -153,6 +167,21 @@ export type SuperviseDeps = {
    * default and the only behaviour when no guard is wired.
    */
   relaunchAfterExit?: (run: EngineRun) => boolean;
+  /**
+   * How long a reconcile-triggered drain gets before boot escalates to
+   * SIGKILL (#23). Defaults to `DEFAULT_RECONCILE_DRAIN_TIMEOUT_MS`.
+   */
+  drainTimeoutMs?: number;
+  /**
+   * Sleeps for the drain-timeout race; injectable so the bound is unit-tested
+   * without a real timer. Defaults to a real `setTimeout`.
+   */
+  sleep?: (ms: number) => Promise<void>;
+  /**
+   * A reconcile-triggered drain exceeded its bound and boot escalated to
+   * SIGKILL — the engine did not finish its unit (or exit) in time.
+   */
+  onDrainTimeout?: (reason: ReconcileReason) => void;
 };
 
 /**
@@ -330,11 +359,46 @@ export async function superviseEngine(deps: SuperviseDeps): Promise<EngineExit> 
     }
 
     deps.onRelaunch?.(outcome.reason);
-    child.kill("SIGTERM");
+    // A ref change gets a distinct signal from a plain container stop, so the
+    // draining engine's own status snapshot can report *why* (#23,
+    // src/drain.ts). A config change is not (yet) distinguished from a plain
+    // stop — it stays on SIGTERM.
+    child.kill(outcome.reason === "ref" ? REF_CHANGE_DRAIN_SIGNAL : "SIGTERM");
     // Nothing new starts until the drain finishes: one engine at a time, and the
-    // in-flight work unit runs to completion.
-    const exit = await child.exited;
+    // in-flight work unit runs to completion — but bounded, so an engine wedged
+    // mid-drain cannot hang the upgrade forever.
+    const exit = await boundedDrain(child, {
+      timeoutMs: deps.drainTimeoutMs ?? DEFAULT_RECONCILE_DRAIN_TIMEOUT_MS,
+      sleep: deps.sleep ?? defaultSleep,
+      onTimeout: () => deps.onDrainTimeout?.(outcome.reason),
+    });
     deps.onRunEnd?.({ engine, exit, elapsedMs: now() - startedAt, requestedStop: true });
     if (deps.stop.requested) return exit;
   }
+}
+
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    // A timer that outlives the race it belongs to (the child exited first)
+    // must not itself keep the process alive for up to an hour.
+    setTimeout(resolve, ms).unref();
+  });
+
+/**
+ * Await a drained child, escalating to SIGKILL if it has not exited within
+ * `timeoutMs`. The bound exists only for a wedged drain (a stuck git push, a
+ * hung process) — a healthy unit that is merely still running is expected to
+ * finish well inside it (see `DEFAULT_RECONCILE_DRAIN_TIMEOUT_MS`).
+ */
+async function boundedDrain(
+  child: SupervisedChild,
+  opts: { timeoutMs: number; sleep: (ms: number) => Promise<void>; onTimeout: () => void },
+): Promise<EngineExit> {
+  const exitOutcome = child.exited.then((exit) => ({ kind: "exit" as const, exit }));
+  const timeoutOutcome = opts.sleep(opts.timeoutMs).then(() => ({ kind: "timeout" as const }));
+  const raced = await Promise.race([exitOutcome, timeoutOutcome]);
+  if (raced.kind === "exit") return raced.exit;
+  opts.onTimeout();
+  child.kill("SIGKILL");
+  return child.exited;
 }

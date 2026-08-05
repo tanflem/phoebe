@@ -29,7 +29,7 @@ import {
   type Sha,
 } from "./branded.ts";
 import { buildAgentEnv } from "./agent-env.ts";
-import { installDrainSignal, type DrainSignal } from "./drain.ts";
+import { installDrainSignal, REF_CHANGE_DRAIN_SIGNAL, type DrainSignal } from "./drain.ts";
 import { BrokerDisconnectedError, createSlotClient, type SlotClient } from "./slot-client.ts";
 import { RunTimeoutError, resolveRunTimeoutMs, runWithDeadline } from "./run-timeout.ts";
 import {
@@ -86,10 +86,12 @@ import {
   conflictFailureSignature,
   conflictFixFailureComment,
   filterBackoffEligible,
+  findBlockedDependents,
   followUpPrComment,
   formatFailingChecksForPrompt,
   formatIssueRef,
   isReviewSummaryComment,
+  issueAttemptFailureSignature,
   issueBranch,
   isPrInScope,
   isPrMergeConflicting,
@@ -107,8 +109,11 @@ import {
   nativeStackGitConfig,
   oneShotWorkKinds,
   resolveStackedPrPlan,
+  selectStackRetargetCandidates,
   stackedCatchUpRetractionComment,
+  stackRetargetedComment,
   RUN_ONCE_NOTHING_MESSAGE,
+  buildIssueQueue,
   selectFirstWorkUnit,
   selectIssue,
   summarizeChecksSelection,
@@ -658,13 +663,41 @@ function issueBody(issueNumber: number): string {
   ).body;
 }
 
-/** All comment bodies on an issue, oldest first — the raw input to the #15 lease-marker lookup. */
-function fetchIssueCommentBodies(issueNumber: number): string[] {
-  const { comments } = ghJson<{ comments: Array<{ body: string }> }>(
+/** ISO timestamp of an issue's last edit — the #22/#75 auto-unstick baseline for issue-keyed units. */
+function issueUpdatedAt(issueNumber: number): string {
+  return ghJson<{ updatedAt: string }>(
+    ["issue", "view", String(issueNumber), "--json", "updatedAt"],
+    config.issueSource.repoSlug,
+  ).updatedAt;
+}
+
+type IssueComment = { id: string; body: string };
+
+/** Every comment on an issue (id + body), oldest first — the raw input to every marker parse. */
+function fetchIssueComments(issueNumber: number): IssueComment[] {
+  const { comments } = ghJson<{ comments: IssueComment[] }>(
     ["issue", "view", String(issueNumber), "--json", "comments"],
     config.issueSource.repoSlug,
   );
-  return comments.map((comment) => comment.body);
+  return comments;
+}
+
+/** All comment bodies on an issue, oldest first — the raw input to the #15 lease-marker lookup. */
+function fetchIssueCommentBodies(issueNumber: number): string[] {
+  return fetchIssueComments(issueNumber).map((comment) => comment.body);
+}
+
+/** Post `body` as a new issue comment, or edit `existingCommentId` in place if one is given. */
+function postOrUpdateIssueComment(
+  issueNumber: number,
+  body: string,
+  existingCommentId: string | undefined,
+): void {
+  if (existingCommentId) {
+    updateComment(existingCommentId, body);
+  } else {
+    postIssueComment(issueNumber, body);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -744,6 +777,82 @@ function recordFailedAttempt(opts: {
       `[phoebe] Quarantined ${opts.kind} unit for PR #${opts.prNumber} after ${plan.marker.n} attempts with no commit (${opts.signature}).`,
     );
   }
+}
+
+/**
+ * Record one failed (no-PR) claim→release cycle on an issue-keyed unit (#22):
+ * the issues/research sibling of `recordFailedAttempt` (#25), since these
+ * units fail fast at verification rather than hang, so #75's timeout counter
+ * never sees them. `ref` is fixed to the issue number rather than a moving
+ * head SHA — an issue-keyed unit has no in-progress ref to stale-check
+ * against, so the reset on progress is explicit (`resetIssueAttemptCounter`)
+ * instead of inferred from `ref` advancing.
+ */
+function recordFailedIssueAttempt(opts: {
+  kind: "issues" | "research";
+  issueNumber: number;
+  signature: string;
+  dependentsPool: readonly Issue[];
+  nativeBlockersByIssue: NativeBlockerMap;
+}): void {
+  const comments = fetchIssueComments(opts.issueNumber);
+  const found = findLatestUnitAttemptComment(comments, opts.kind);
+  const k = resolveMaxUnitAttempts(process.env, config.maxUnitAttempts);
+  const plan = planUnitAttempt({
+    previous: found?.marker ?? null,
+    ref: String(opts.issueNumber),
+    signature: opts.signature,
+    now: new Date().toISOString(),
+    k,
+  });
+
+  const body = plan.quarantined
+    ? buildQuarantineComment({
+        kind: opts.kind,
+        id: opts.issueNumber,
+        k,
+        baseline: issueUpdatedAt(opts.issueNumber),
+        reason: "was claimed and released with no PR",
+        signature: opts.signature,
+        dependents: findBlockedDependents(
+          opts.issueNumber,
+          opts.dependentsPool,
+          opts.nativeBlockersByIssue,
+        ),
+      })
+    : `⚠️ Phoebe claimed this ${opts.kind === "issues" ? "issue" : "research ticket"} and released it ` +
+      `with no PR (attempt ${plan.marker.n}/${k}, \`${opts.signature}\`). It stays in the ready queue ` +
+      `and will retry once the claim lease expires.`;
+  postOrUpdateIssueComment(
+    opts.issueNumber,
+    `${body}\n\n${buildUnitAttemptMarker(opts.kind, plan.marker)}`,
+    found?.commentId,
+  );
+
+  if (plan.quarantined) {
+    gh(["issue", "edit", String(opts.issueNumber), "--add-label", PHOEBE_QUARANTINE_LABEL]);
+    console.log(
+      `[phoebe] Quarantined ${opts.kind} #${opts.issueNumber} after ${plan.marker.n} claims with no PR (${opts.signature}).`,
+    );
+  }
+}
+
+/**
+ * Clear the #22 no-PR attempt counter once a run produces a PR: edit the
+ * tracking comment (if any) to drop the marker, so the next failure's
+ * `findLatestUnitAttemptComment` reads no prior marker and starts at 1 again.
+ * A unit that never failed has no tracking comment — nothing to reset.
+ */
+function resetIssueAttemptCounter(issueNumber: number, kind: "issues" | "research"): void {
+  const comments = fetchIssueComments(issueNumber);
+  const found = findLatestUnitAttemptComment(comments, kind);
+  if (!found) {
+    return;
+  }
+  updateComment(
+    found.commentId,
+    `✅ Phoebe produced a PR for this ${kind === "issues" ? "issue" : "research ticket"} — the no-PR attempt counter is reset.`,
+  );
 }
 
 function gitInWorktree(
@@ -1098,6 +1207,58 @@ async function runConflictResolutionAgent(
   });
 }
 
+/**
+ * Native-stack retarget sweep (#13): a native-mode successor PR is opened
+ * against its blocker's branch (`resolveStackedPrPlan`), and GitHub only
+ * auto-retargets a PR onto `main` when that base branch is *deleted*. Tenant
+ * repos run `delete_branch_on_merge=false`, so once the blocker's PR merges its
+ * branch survives and the successor's base never moves on its own — an
+ * automerge step with no base filter would then squash the successor into the
+ * stale blocker branch instead of `main`, losing its work silently. This
+ * explicitly retargets every open Phoebe PR whose base is a merged blocker's
+ * branch back onto `defaultBranch`. Harmless (and a no-op) under `banner`/`off`
+ * stack modes, since only `native` ever bases a PR on another Phoebe branch.
+ */
+function retargetMergedStackedPrs(): void {
+  const openPrs = listOpenPhoebePrs();
+  const blockerIssueNumbers = new Set<number>();
+  for (const pr of openPrs) {
+    const blockerIssueNumber = parseIssueNumberFromBranch(pr.baseRefName);
+    if (blockerIssueNumber !== null) {
+      blockerIssueNumbers.add(blockerIssueNumber);
+    }
+  }
+  if (blockerIssueNumbers.size === 0) {
+    return;
+  }
+
+  const blockerStates = new Map<number, BlockerPrState>();
+  for (const blockerIssueNumber of blockerIssueNumbers) {
+    try {
+      blockerStates.set(blockerIssueNumber, blockerPrState(blockerIssueNumber));
+    } catch (error) {
+      console.warn(
+        `[phoebe] Skipping stack-retarget check for blocker #${blockerIssueNumber} this cycle — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  const candidates = openPrs.map((pr) => ({ prNumber: pr.number, baseRefName: pr.baseRefName }));
+  for (const pr of selectStackRetargetCandidates(candidates, blockerStates)) {
+    console.log(
+      `[phoebe] Retargeting PR #${pr.prNumber} from ${pr.baseRefName} to ${config.defaultBranch} — blocker merged.`,
+    );
+    try {
+      gh(["pr", "edit", String(pr.prNumber), "--base", config.defaultBranch]);
+      postPrComment(pr.prNumber, stackRetargetedComment(config.defaultBranch));
+    } catch (error) {
+      console.warn(
+        `[phoebe] Failed to retarget PR #${pr.prNumber} — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+}
+
 async function fixOnePrConflict(
   pr: ConflictingPrCandidate,
   ctx: StackContext,
@@ -1393,6 +1554,9 @@ async function runOneIssue(opts: {
   promptFile: string;
   blockerIssueNumber?: number;
   blockerPrNumber?: PrNumber;
+  attemptKind: "issues" | "research";
+  dependentsPool: readonly Issue[];
+  nativeBlockersByIssue: NativeBlockerMap;
 }): Promise<UnitResult> {
   const { issueNumber, issueTitle, worktreeBase, stacked, promptFile } = opts;
   const { blockerIssueNumber, blockerPrNumber } = opts;
@@ -1420,17 +1584,23 @@ async function runOneIssue(opts: {
 
     if (newCommitCount > 0) {
       pushBranch(worktreeDir, agentBranch);
-      const existingPrRow = ghJson<Array<{ number: number }>>([
-        "pr",
-        "list",
-        "--head",
-        agentBranch,
-        "--state",
-        "open",
-        "--json",
-        "number",
-      ])[0];
-      const existingPr = existingPrRow ? asPrNumber(existingPrRow.number) : undefined;
+    }
+    // Looked up regardless of `newCommitCount` (#22): an issue reclaimed after
+    // its PR already opened must read as "has a PR", not as a fresh no-progress
+    // attempt, even when this particular run added nothing.
+    const existingPrRow = ghJson<Array<{ number: number }>>([
+      "pr",
+      "list",
+      "--head",
+      agentBranch,
+      "--state",
+      "open",
+      "--json",
+      "number",
+    ])[0];
+    const existingPr = existingPrRow ? asPrNumber(existingPrRow.number) : undefined;
+
+    if (newCommitCount > 0) {
       if (existingPr === undefined) {
         // Which base branch, whether to add the stacked banner, and whether to
         // register a native GitHub stack — all decided purely from stackMode +
@@ -1491,6 +1661,24 @@ async function runOneIssue(opts: {
     } else {
       console.log("[phoebe] No commits — skipping PR creation.");
     }
+
+    // #22: count claim→release cycles that end with no PR for this issue, and
+    // quarantine at threshold — the fails-fast sibling of #75's timeout
+    // counter for issue-keyed units. A PR now existing (just created, already
+    // open, or found for an issue reclaimed mid-review) resets the counter.
+    if (newCommitCount > 0 || existingPr !== undefined) {
+      resetIssueAttemptCounter(issueNumber, opts.attemptKind);
+    } else {
+      const failedCommand = verification?.find((v) => v.status === "failed")?.command;
+      recordFailedIssueAttempt({
+        kind: opts.attemptKind,
+        issueNumber,
+        signature: issueAttemptFailureSignature({ failedCommand, agentExitCode }),
+        dependentsPool: opts.dependentsPool,
+        nativeBlockersByIssue: opts.nativeBlockersByIssue,
+      });
+    }
+
     return { exitCode: agentExitCode, verification };
   } finally {
     removeVerificationReport(reportPath);
@@ -1511,6 +1699,9 @@ type RunContext = {
   stack: StackContext;
   phoebeLogin: string;
   runtimeId: string;
+  /** issues + researchIssues from this cycle's fetch — the pool `findBlockedDependents` (#22) scans. */
+  dependentsPool: readonly Issue[];
+  nativeBlockersByIssue: NativeBlockerMap;
 };
 
 type WorkKind = {
@@ -1795,8 +1986,9 @@ function fetchResearchWorkData(): {
   };
 }
 
-async function runIssueUnit(unit: IssueWorkUnit, runtimeId: string): Promise<UnitResult> {
+async function runIssueUnit(unit: IssueWorkUnit, context: RunContext): Promise<UnitResult> {
   const { issue: target, resolution } = unit;
+  const { runtimeId } = context;
   console.log(
     `[phoebe] Working #${target.number} — base ${resolution.worktreeBase}` +
       (resolution.stacked ? ` (stacked on #${resolution.blockerIssueNumber})` : "") +
@@ -1825,13 +2017,16 @@ async function runIssueUnit(unit: IssueWorkUnit, runtimeId: string): Promise<Uni
       promptFile: config.promptFiles.issue,
       blockerIssueNumber: resolution.blockerIssueNumber,
       blockerPrNumber: resolution.blockerPrNumber,
+      attemptKind: "issues",
+      dependentsPool: context.dependentsPool,
+      nativeBlockersByIssue: context.nativeBlockersByIssue,
     });
   } finally {
     stopHeartbeat();
   }
 }
 
-async function runResearchUnit(unit: IssueWorkUnit): Promise<UnitResult> {
+async function runResearchUnit(unit: IssueWorkUnit, context: RunContext): Promise<UnitResult> {
   const { issue: target, resolution } = unit;
   console.log(
     `[phoebe] Researching #${target.number} — base ${resolution.worktreeBase}` +
@@ -1846,6 +2041,9 @@ async function runResearchUnit(unit: IssueWorkUnit): Promise<UnitResult> {
     promptFile: config.promptFiles.research,
     blockerIssueNumber: resolution.blockerIssueNumber,
     blockerPrNumber: resolution.blockerPrNumber,
+    attemptKind: "research",
+    dependentsPool: context.dependentsPool,
+    nativeBlockersByIssue: context.nativeBlockersByIssue,
   });
 }
 
@@ -1887,7 +2085,7 @@ const KINDS: Record<WorkKindName, WorkKind> = {
       return { kind: "issues", issues, blockerStates, nativeBlockersByIssue };
     },
     runUnit: async (unit, context) => {
-      return runIssueUnit(unit as IssueWorkUnit, context.runtimeId);
+      return runIssueUnit(unit as IssueWorkUnit, context);
     },
   },
   research: {
@@ -1896,8 +2094,8 @@ const KINDS: Record<WorkKindName, WorkKind> = {
       const { researchIssues, blockerStates, nativeBlockersByIssue } = fetchResearchWorkData();
       return { kind: "research", researchIssues, blockerStates, nativeBlockersByIssue };
     },
-    runUnit: async (unit) => {
-      return runResearchUnit(unit as IssueWorkUnit);
+    runUnit: async (unit, context) => {
+      return runResearchUnit(unit as IssueWorkUnit, context);
     },
   },
 };
@@ -2244,7 +2442,7 @@ export async function runEngine(argv: readonly string[] = process.argv.slice(2))
     statusPath: join(config.paths.stateDir, STATUS_FILE),
   });
 
-  const drain = installDrainSignal();
+  const drain = installDrainSignal(process, ["SIGTERM", REF_CHANGE_DRAIN_SIGNAL]);
   let failed = false;
   try {
     await runLoop({ runOnce, dryRun, pollIntervalMs, drain, status, slotClient, emitUnitEvent });
@@ -2256,6 +2454,18 @@ export async function runEngine(argv: readonly string[] = process.argv.slice(2))
     if (!failed) status.record({ kind: "stopped" });
     drain.dispose();
   }
+}
+
+/**
+ * The `lifecycle.reason` prefix for a "draining" transition — distinguishes a
+ * ref-change drain (`phoebe boot`'s reconcile watch, REF_CHANGE_DRAIN_SIGNAL)
+ * from a plain container stop (SIGTERM), so an operator reading the status
+ * snapshot can tell "about to relaunch on the new commit" from "shutting
+ * down" (#23).
+ */
+function drainReason(drain: DrainSignal, detail: string): string {
+  const cause = drain.signal === REF_CHANGE_DRAIN_SIGNAL ? "Engine ref changed" : "Drain requested";
+  return `${cause} — ${detail}`;
 }
 
 async function runLoop({
@@ -2280,7 +2490,7 @@ async function runLoop({
       console.log("[phoebe] Drain requested — starting no new work unit; exiting 0.");
       status.record({
         kind: "draining",
-        reason: "Drain requested — starting no new work unit.",
+        reason: drainReason(drain, "starting no new work unit."),
       });
       break;
     }
@@ -2292,10 +2502,24 @@ async function runLoop({
     // thrash-retrying) its own just-failed unit.
     if (inContainer && !dryRun) {
       reclaimStaleClaims(status.snapshot().runtime.runtimeId, { forceOwnReclaim: false });
+      // #13: keep native-stack successor PRs from being stranded on a merged,
+      // undeleted blocker branch — see retargetMergedStackedPrs.
+      retargetMergedStackedPrs();
     }
     status.record({ kind: "selecting" });
     const fetchKinds = runOnce ? oneShotWorkKinds(workOrder) : workOrder;
     const data = await fetchCycleWorkData(fetchKinds);
+    // #20: publish the resolved `issues` lookahead — every eligible issue in
+    // selection order with its full blocker set, not just the one `selectIssue`
+    // is about to pick — so an observer can see what comes after `activeWork`.
+    status.setQueue(
+      buildIssueQueue(
+        data.issues,
+        data.blockerStates,
+        process.env["PHOEBE_BASE"],
+        data.nativeBlockersByIssue,
+      ),
+    );
     const picked = selectFirstWorkUnit(
       workOrder,
       {
@@ -2335,7 +2559,7 @@ async function runLoop({
       console.log("[phoebe] Drain requested before starting the next unit — exiting 0.");
       status.record({
         kind: "draining",
-        reason: "Drain requested before starting the next unit.",
+        reason: drainReason(drain, "starting no new work unit."),
       });
       break;
     }
@@ -2382,6 +2606,8 @@ async function runLoop({
           stack: { issueBodies: data.issueBodies, blockerStates: data.blockerStates },
           phoebeLogin: data.phoebeLogin ?? "",
           runtimeId: status.snapshot().runtime.runtimeId,
+          dependentsPool: [...data.issues, ...data.researchIssues],
+          nativeBlockersByIssue: data.nativeBlockersByIssue,
         },
       );
       const pullRequestNumber = pullRequestNumberAfterWork(picked);
@@ -2454,7 +2680,7 @@ async function runLoop({
       console.log("[phoebe] Finished the in-flight unit under drain — exiting 0.");
       status.record({
         kind: "draining",
-        reason: "Finished the in-flight unit under drain.",
+        reason: drainReason(drain, "the in-flight unit finished."),
       });
       break;
     }

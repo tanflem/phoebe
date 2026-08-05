@@ -17,6 +17,7 @@ import {
   conflictFailureSignature,
   conflictFixFailureComment,
   filterBackoffEligible,
+  findBlockedDependents,
   followUpPrComment,
   formatFailingChecksForPrompt,
   formatIssueRef,
@@ -25,6 +26,7 @@ import {
   isPrInScope,
   isPrMergeConflicting,
   isReviewSummaryComment,
+  issueAttemptFailureSignature,
   issueBranch,
   issueBlockers,
   listFailingChecks,
@@ -37,6 +39,7 @@ import {
   parseReviewsHandledWatermark,
   parseIssueNumberFromBranch,
   resolveWorktreeBase,
+  buildIssueQueue,
   resolveStackedPrPlan,
   getMergedBlockerPrNumbers,
   ghStackExtensionInstallArgs,
@@ -48,6 +51,7 @@ import {
   selectFirstWorkUnit,
   selectIssue,
   selectReviewsUnit,
+  selectStackRetargetCandidates,
   summarizeChecksSelection,
   summarizeConflictSelection,
   summarizeReviewsSelection,
@@ -65,6 +69,7 @@ import {
   slugifyFailureSignature,
   stackedCatchUpRetractionComment,
   stackedPrComment,
+  stackRetargetedComment,
   type BlockerPrState,
   type ChecksCandidate,
   type ConflictingPrCandidate,
@@ -283,6 +288,65 @@ describe("resolveWorktreeBase", () => {
       blockerPrNumber: 104,
     });
   });
+
+  describe("multi-blocker (#13)", () => {
+    test("skips when any blocker has no PR at all yet, even if others are open", () => {
+      const blocked = issue({ number: 102, body: "Blocked by #98\nBlocked by #99" });
+      const states = new Map<number, BlockerPrState>([
+        [98, { hasOpenPr: true, openPrNumber: asPrNumber(104), hasMergedPr: false }],
+        [99, { hasOpenPr: false, hasMergedPr: false }],
+      ]);
+      expect(resolveWorktreeBase(blocked, states)).toBeNull();
+    });
+
+    test("bases off main once every blocker has merged", () => {
+      const blocked = issue({ number: 102, body: "Blocked by #98\nBlocked by #99" });
+      const states = new Map<number, BlockerPrState>([
+        [98, { hasOpenPr: false, hasMergedPr: true, mergedPrNumber: asPrNumber(104) }],
+        [99, { hasOpenPr: false, hasMergedPr: true, mergedPrNumber: asPrNumber(105) }],
+      ]);
+      expect(resolveWorktreeBase(blocked, states)).toEqual({
+        worktreeBase: "origin/main",
+        stacked: false,
+      });
+    });
+
+    test("stacks on the still-unmerged blocker when one of two has merged", () => {
+      const blocked = issue({ number: 102, body: "Blocked by #98\nBlocked by #99" });
+      const states = new Map<number, BlockerPrState>([
+        [98, { hasOpenPr: false, hasMergedPr: true, mergedPrNumber: asPrNumber(104) }],
+        [99, { hasOpenPr: true, openPrNumber: asPrNumber(107), hasMergedPr: false }],
+      ]);
+      expect(resolveWorktreeBase(blocked, states)).toEqual({
+        worktreeBase: `origin/${issueBranch(99)}`,
+        stacked: true,
+        blockerIssueNumber: 99,
+        blockerPrNumber: 107,
+      });
+    });
+
+    test("stacks on the last-listed unmerged blocker when several are still open", () => {
+      const blocked = issue({ number: 102, body: "Blocked by #98\nBlocked by #99" });
+      const states = new Map<number, BlockerPrState>([
+        [98, { hasOpenPr: true, openPrNumber: asPrNumber(104), hasMergedPr: false }],
+        [99, { hasOpenPr: true, openPrNumber: asPrNumber(107), hasMergedPr: false }],
+      ]);
+      expect(resolveWorktreeBase(blocked, states)).toEqual({
+        worktreeBase: `origin/${issueBranch(99)}`,
+        stacked: true,
+        blockerIssueNumber: 99,
+        blockerPrNumber: 107,
+      });
+    });
+
+    test("skips when one blocker's state is entirely unknown", () => {
+      const blocked = issue({ number: 102, body: "Blocked by #98\nBlocked by #99" });
+      const states = new Map<number, BlockerPrState>([
+        [98, { hasOpenPr: true, openPrNumber: asPrNumber(104), hasMergedPr: false }],
+      ]);
+      expect(resolveWorktreeBase(blocked, states)).toBeNull();
+    });
+  });
 });
 
 describe("resolveStackedPrPlan", () => {
@@ -400,6 +464,52 @@ describe("selectIssue", () => {
     expect(picked?.resolution.stacked).toBe(true);
     expect(picked?.resolution.blockerIssueNumber).toBe(98);
     setResolvedConfig(resolveConfig(sampleUserConfig));
+  });
+});
+
+describe("buildIssueQueue (#20)", () => {
+  test("returns an empty queue when there are no eligible issues", () => {
+    expect(buildIssueQueue([], new Map())).toEqual([]);
+  });
+
+  test("orders a linear chain and reports the full resolved blocker set", () => {
+    const issues = [
+      issue({ number: 101, title: "Add toggle", body: "Blocked by #100" }),
+      issue({ number: 100, title: "Fix crash on startup" }),
+    ];
+    const states = new Map<number, BlockerPrState>([
+      [100, { hasOpenPr: true, openPrNumber: asPrNumber(200), hasMergedPr: false }],
+    ]);
+    expect(buildIssueQueue(issues, states)).toEqual([
+      { issueNumber: 100, blockedBy: [], workable: true },
+      { issueNumber: 101, blockedBy: [100], workable: true },
+    ]);
+  });
+
+  test("marks an issue not workable when a blocker has no PR yet", () => {
+    const issues = [issue({ number: 101, body: "Blocked by #100" })];
+    const states = new Map<number, BlockerPrState>([
+      [100, { hasOpenPr: false, hasMergedPr: false }],
+    ]);
+    expect(buildIssueQueue(issues, states)).toEqual([
+      { issueNumber: 101, blockedBy: [100], workable: false },
+    ]);
+  });
+
+  test("reports both blockers on a diamond issue, workable once each has a PR", () => {
+    const issues = [issue({ number: 103, body: "Blocked by #101\nBlocked by #102" })];
+    const states = new Map<number, BlockerPrState>([
+      [101, { hasOpenPr: true, openPrNumber: asPrNumber(201), hasMergedPr: false }],
+      [102, { hasOpenPr: true, openPrNumber: asPrNumber(202), hasMergedPr: false }],
+    ]);
+    expect(buildIssueQueue(issues, states)).toEqual([
+      { issueNumber: 103, blockedBy: [101, 102], workable: true },
+    ]);
+  });
+
+  test("excludes quarantined issues", () => {
+    const issues = [issue({ number: 104, labels: ["phoebe:quarantined"] })];
+    expect(buildIssueQueue(issues, new Map())).toEqual([]);
   });
 });
 
@@ -621,6 +731,43 @@ describe("stackedCatchUpRetractionComment", () => {
     const comment = stackedCatchUpRetractionComment([asPrNumber(110), asPrNumber(111)]);
     expect(comment).toContain("#110");
     expect(comment).toContain("#111");
+  });
+});
+
+describe("selectStackRetargetCandidates", () => {
+  test("selects a PR based on a blocker branch whose PR has merged", () => {
+    const prs = [{ prNumber: asPrNumber(200), baseRefName: issueBranch(98) }];
+    const states = new Map<number, BlockerPrState>([
+      [98, { hasOpenPr: false, hasMergedPr: true, mergedPrNumber: asPrNumber(104) }],
+    ]);
+    expect(selectStackRetargetCandidates(prs, states)).toEqual(prs);
+  });
+
+  test("ignores a PR based on a blocker branch whose PR is still open", () => {
+    const prs = [{ prNumber: asPrNumber(200), baseRefName: issueBranch(98) }];
+    const states = new Map<number, BlockerPrState>([
+      [98, { hasOpenPr: true, openPrNumber: asPrNumber(104), hasMergedPr: false }],
+    ]);
+    expect(selectStackRetargetCandidates(prs, states)).toEqual([]);
+  });
+
+  test("ignores a PR already based on defaultBranch (not a stack branch)", () => {
+    const prs = [{ prNumber: asPrNumber(200), baseRefName: asBranchRef("main") }];
+    const states = new Map<number, BlockerPrState>();
+    expect(selectStackRetargetCandidates(prs, states)).toEqual([]);
+  });
+
+  test("ignores a PR whose base blocker has no known state", () => {
+    const prs = [{ prNumber: asPrNumber(200), baseRefName: issueBranch(98) }];
+    expect(selectStackRetargetCandidates(prs, new Map())).toEqual([]);
+  });
+});
+
+describe("stackRetargetedComment", () => {
+  test("names the default branch", () => {
+    const comment = stackRetargetedComment("main");
+    expect(comment).toContain("`main`");
+    expect(comment).toContain("retargeted");
   });
 });
 
@@ -2012,6 +2159,53 @@ describe("checksFailureSignature", () => {
     expect(checksFailureSignature([{ name: "lint", conclusion: "failure" }])).toBe(
       "checks-failed-lint",
     );
+  });
+});
+
+describe("issueAttemptFailureSignature (#22)", () => {
+  test("embeds the verification report's failed command", () => {
+    expect(issueAttemptFailureSignature({ failedCommand: "apply_patch", agentExitCode: 1 })).toBe(
+      "apply-patch-failed",
+    );
+  });
+  test("falls back to the agent exit code with no verification report", () => {
+    expect(issueAttemptFailureSignature({ agentExitCode: 2 })).toBe("agent-exit-2");
+  });
+  test("falls back to a generic marker with no signal at all", () => {
+    expect(issueAttemptFailureSignature({ agentExitCode: null })).toBe("no-commit-produced");
+    expect(issueAttemptFailureSignature({ agentExitCode: 0 })).toBe("no-commit-produced");
+  });
+});
+
+describe("findBlockedDependents (#22)", () => {
+  test("finds open issues that name the quarantined issue as a body blocker", () => {
+    const issues = [
+      issue({ number: 763, body: "Blocked by #784" }),
+      issue({ number: 700, body: "Blocked by #784\nAlso relates to #1" }),
+      issue({ number: 900, body: "unrelated" }),
+    ];
+    expect(findBlockedDependents(784, issues)).toEqual([763, 700]);
+  });
+
+  test("finds dependents via native blockers", () => {
+    setResolvedConfig(resolveConfig({ ...sampleUserConfig, blockerSource: "native" }));
+    try {
+      const issues = [issue({ number: 50, body: "no body refs" })];
+      const nativeBlockersByIssue = new Map([[50, [784]]]);
+      expect(findBlockedDependents(784, issues, nativeBlockersByIssue)).toEqual([50]);
+    } finally {
+      setResolvedConfig(resolveConfig(sampleUserConfig));
+    }
+  });
+
+  test("excludes the issue itself even if self-referential", () => {
+    const issues = [issue({ number: 784, body: "Blocked by #784" })];
+    expect(findBlockedDependents(784, issues)).toEqual([]);
+  });
+
+  test("empty when nothing depends on it", () => {
+    const issues = [issue({ number: 1, body: "" })];
+    expect(findBlockedDependents(784, issues)).toEqual([]);
   });
 });
 

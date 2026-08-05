@@ -125,7 +125,7 @@ Docs live under [`docs/`](docs/):
 - [`docs/configuration.md`](docs/configuration.md) — full config-field reference and env overlay.
 - [`docs/work-kinds.md`](docs/work-kinds.md) — issues / conflicts / checks / reviews / research mechanics, PR-scan scope, poll loop.
 - [`docs/operating.md`](docs/operating.md) — controlling Phoebe as a human (labels, drafts, watermarks).
-- [`docs/status-contract.md`](docs/status-contract.md) — the local `status-v1` snapshot and replayable `events-v1` outcome journal.
+- [`docs/status-contract.md`](docs/status-contract.md) — the local `status-v2` snapshot and replayable `events-v1` outcome journal.
 - [`docs/upgrading.md`](docs/upgrading.md) — the init / pin / upgrade contract.
 - [`docs/ai-install.md`](docs/ai-install.md) — a deterministic, agent-followable install runbook.
 - [`docs/releasing.md`](docs/releasing.md) — the Changesets + npm trusted-publishing release flow.

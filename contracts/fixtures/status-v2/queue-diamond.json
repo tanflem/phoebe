@@ -1,6 +1,6 @@
 {
-  "schemaVersion": "status-v1",
-  "updatedAt": "2026-07-30T12:03:00.000Z",
+  "schemaVersion": "status-v2",
+  "updatedAt": "2026-07-30T12:06:00.000Z",
   "runtime": {
     "runtimeId": "runtime-1",
     "instanceId": "instance-1",
@@ -19,35 +19,31 @@
     "prompts": "sha256:prompts",
     "providerModel": "sha256:provider-model"
   },
-  "capabilities": ["status-v1", "events-v1", "events-replay-v1", "events-range-v1"],
-  "lifecycle": { "state": "draining", "reason": "Finishing the in-flight work unit." },
-  "activeWork": {
-    "workId": "reviews:9",
-    "kind": "reviews",
-    "pullRequestNumber": 9,
-    "branch": "phoebe/issue-42",
-    "startedAt": "2026-07-30T12:00:05.000Z"
-  },
+  "capabilities": ["status-v2", "events-v1", "events-replay-v1", "events-range-v1"],
+  "lifecycle": { "state": "selecting" },
+  "activeWork": null,
+  "queue": [
+    { "issueNumber": 101, "blockedBy": [], "workable": true },
+    { "issueNumber": 102, "blockedBy": [], "workable": true },
+    { "issueNumber": 103, "blockedBy": [101, 102], "workable": true }
+  ],
   "lastSuccess": null,
   "lastFailure": null,
   "control": {
     "retry": { "attempt": 0 },
     "backoff": { "active": false },
     "quarantine": { "active": false },
-    "drain": { "requested": true, "requestedAt": "2026-07-30T12:03:00.000Z" }
+    "drain": { "requested": false }
   },
   "health": {
     "state": "healthy",
     "telemetry": { "writable": true, "lastError": null, "lastErrorAt": null }
   },
   "journal": {
-    "earliestSequence": 1,
-    "latestSequence": 4,
-    "retainedSegments": 1,
+    "earliestSequence": null,
+    "latestSequence": null,
+    "retainedSegments": 0,
     "quarantinedTailCount": 0
   },
-  "links": {
-    "repository": "https://github.com/owner/repo",
-    "pullRequest": "https://github.com/owner/repo/pull/9"
-  }
+  "links": { "repository": "https://github.com/owner/repo" }
 }

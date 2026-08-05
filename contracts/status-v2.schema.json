@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://phoebe.dev/contracts/status-v1.schema.json",
-  "title": "Phoebe runtime status v1",
+  "$id": "https://phoebe.dev/contracts/status-v2.schema.json",
+  "title": "Phoebe runtime status v2",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -13,6 +13,7 @@
     "capabilities",
     "lifecycle",
     "activeWork",
+    "queue",
     "lastSuccess",
     "lastFailure",
     "control",
@@ -21,7 +22,7 @@
     "links"
   ],
   "properties": {
-    "schemaVersion": { "const": "status-v1" },
+    "schemaVersion": { "const": "status-v2" },
     "updatedAt": { "type": "string", "format": "date-time" },
     "runtime": {
       "type": "object",
@@ -59,7 +60,7 @@
     "capabilities": {
       "type": "array",
       "items": { "type": "string" },
-      "contains": { "const": "status-v1" }
+      "contains": { "const": "status-v2" }
     },
     "lifecycle": {
       "type": "object",
@@ -89,6 +90,19 @@
           }
         }
       ]
+    },
+    "queue": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["issueNumber", "blockedBy", "workable"],
+        "properties": {
+          "issueNumber": { "type": "integer", "minimum": 1 },
+          "blockedBy": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
+          "workable": { "type": "boolean" }
+        }
+      }
     },
     "lastSuccess": { "$ref": "#/$defs/nullableOutcome" },
     "lastFailure": { "$ref": "#/$defs/nullableOutcome" },

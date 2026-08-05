@@ -13,7 +13,7 @@ import {
 const roots: string[] = [];
 
 function stateDir(): string {
-  const root = mkdtempSync(join(tmpdir(), "phoebe-status-v1-"));
+  const root = mkdtempSync(join(tmpdir(), "phoebe-status-v2-"));
   roots.push(root);
   return root;
 }
@@ -43,9 +43,10 @@ const snapshot = (): StatusSnapshot => ({
     prompts: "sha256:prompts",
     providerModel: "sha256:provider-model",
   },
-  capabilities: ["status-v1", "events-v1"],
+  capabilities: ["status-v2", "events-v1"],
   lifecycle: { state: "idle" },
   activeWork: null,
+  queue: [],
   lastSuccess: null,
   lastFailure: null,
   control: {
@@ -67,7 +68,7 @@ const snapshot = (): StatusSnapshot => ({
   links: { repository: "https://github.com/owner/repo" },
 });
 
-describe("status-v1 store", () => {
+describe("status-v2 store", () => {
   test("replaces the snapshot with one atomic rename", () => {
     const calls: string[] = [];
     const dir = stateDir();
@@ -79,8 +80,8 @@ describe("status-v1 store", () => {
     });
 
     expect(calls).toHaveLength(2);
-    expect(calls[0]).toMatch(/write:.*status-v1\.json\.tmp-/);
-    expect(calls[1]).toMatch(/rename:.*status-v1\.json\.tmp-.*:.*status-v1\.json/);
+    expect(calls[0]).toMatch(/write:.*status-v2\.json\.tmp-/);
+    expect(calls[1]).toMatch(/rename:.*status-v2\.json\.tmp-.*:.*status-v2\.json/);
   });
 
   test("reads the exact projection and returns structured missing/corrupt states", () => {
@@ -104,9 +105,9 @@ describe("status-v1 store", () => {
     const dir = stateDir();
     writeFileSync(
       statusSnapshotPath(dir),
-      JSON.stringify({ ...snapshot(), schemaVersion: "status-v2" }),
+      JSON.stringify({ ...snapshot(), schemaVersion: "status-v1" }),
     );
-    expect(() => readStatusSnapshot(dir)).toThrow(/supports status-v1 but received status-v2/);
+    expect(() => readStatusSnapshot(dir)).toThrow(/supports status-v2 but received status-v1/);
   });
 
   test("persists a generated runtime ID and honors an explicit stable ID", () => {

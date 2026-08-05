@@ -101,6 +101,29 @@ describe("runtime status projection", () => {
     });
   });
 
+  test("publishes the resolved issue queue lookahead (#20)", () => {
+    const stateDir = makeStateDir();
+    const reporter = createRuntimeStatusReporter({
+      stateDir,
+      runtimeId: "runtime-1",
+      ...context,
+    });
+
+    reporter.setQueue([
+      { issueNumber: 100, blockedBy: [], workable: true },
+      { issueNumber: 103, blockedBy: [101, 102], workable: false },
+    ]);
+
+    const expectedQueue = [
+      { issueNumber: 100, blockedBy: [], workable: true },
+      { issueNumber: 103, blockedBy: [101, 102], workable: false },
+    ];
+    expect(reporter.snapshot().queue).toEqual(expectedQueue);
+    const persisted = readStatusSnapshot(stateDir);
+    expect(persisted).toMatchObject({ available: true });
+    expect(persisted.available && persisted.status.queue).toEqual(expectedQueue);
+  });
+
   test("preserves the last success and failure when the runtime restarts", () => {
     const stateDir = makeStateDir();
     const first = createRuntimeStatusReporter({

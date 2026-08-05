@@ -128,6 +128,14 @@ export function issueBranch(issueNumber: number): BranchRef {
  * Resolve the worktree base for an issue.
  * Returns `null` when the issue should be skipped this cycle (blocked with no
  * open/merged blocker PR).
+ *
+ * A diamond/multi-blocker issue (#13) must gate on *every* blocker, not just
+ * the first: any blocker with no PR at all yet parks the issue, exactly as the
+ * single-blocker case always has. Once every blocker has at least an open PR,
+ * the issue is workable — stacked on whichever blocker is still unmerged
+ * (the last one in blocker-list order, so a diamond re-bases forward as each
+ * of its parents merges in turn) unless every blocker has already merged, in
+ * which case the branch cuts off `main` same as an unblocked issue.
  */
 export function resolveWorktreeBase(
   issue: Issue,
@@ -145,33 +153,40 @@ export function resolveWorktreeBase(
     return { worktreeBase: "origin/main", stacked: false };
   }
 
-  const blockerIssueNumber = blockers[0]!;
-  const state = blockerStates.get(blockerIssueNumber);
-  if (!state) {
-    return null;
-  }
-
-  if (state.hasOpenPr) {
-    // `off` still honors the blocker for the skip decision above, but never
-    // stacks: the branch is cut off main and no banner is added downstream.
-    if (stackMode === "off") {
-      return { worktreeBase: "origin/main", stacked: false };
+  let lastUnmergedBlocker: { issueNumber: number; state: BlockerPrState } | null = null;
+  for (const blockerIssueNumber of blockers) {
+    const state = blockerStates.get(blockerIssueNumber);
+    if (!state) {
+      return null;
     }
-    // `banner` and `native` both cut the branch off the blocker's tip; they
-    // diverge only in the PR base + banner, decided by `resolveStackedPrPlan`.
-    return {
-      worktreeBase: `origin/${issueBranch(blockerIssueNumber)}`,
-      stacked: true,
-      blockerIssueNumber,
-      blockerPrNumber: state.openPrNumber,
-    };
+    if (state.hasMergedPr) {
+      continue;
+    }
+    if (!state.hasOpenPr) {
+      return null;
+    }
+    lastUnmergedBlocker = { issueNumber: blockerIssueNumber, state };
   }
 
-  if (state.hasMergedPr) {
+  if (!lastUnmergedBlocker) {
+    // Every blocker has merged.
     return { worktreeBase: "origin/main", stacked: false };
   }
 
-  return null;
+  // `off` still honors every blocker for the skip decision above, but never
+  // stacks: the branch is cut off main and no banner is added downstream.
+  if (stackMode === "off") {
+    return { worktreeBase: "origin/main", stacked: false };
+  }
+
+  // `banner` and `native` both cut the branch off the unmerged blocker's tip;
+  // they diverge only in the PR base + banner, decided by `resolveStackedPrPlan`.
+  return {
+    worktreeBase: `origin/${issueBranch(lastUnmergedBlocker.issueNumber)}`,
+    stacked: true,
+    blockerIssueNumber: lastUnmergedBlocker.issueNumber,
+    blockerPrNumber: lastUnmergedBlocker.state.openPrNumber,
+  };
 }
 
 /** Pick the highest-priority workable issue, or `null` when none qualify. */
@@ -216,6 +231,31 @@ export function formatIssueRef(
     return `#${issueNumber}`;
   }
   return `${issueSourceRepoSlug}#${issueNumber}`;
+}
+
+/**
+ * The full `issues` work order, ordered as {@link selectIssue} would take it,
+ * with each entry's resolved blocker set and whether it is workable this
+ * cycle — the status-v2 `queue` lookahead. Unlike `selectIssue`, which stops at
+ * the first workable candidate, this walks every eligible issue so an operator
+ * can see what comes after `activeWork`, not just what runs next.
+ */
+export function buildIssueQueue(
+  issues: readonly Issue[],
+  blockerStates: ReadonlyMap<number, BlockerPrState>,
+  phoebeBase?: string,
+  nativeBlockersByIssue: NativeBlockerMap = new Map(),
+): Array<{ issueNumber: number; blockedBy: readonly number[]; workable: boolean }> {
+  const eligible = issues.filter((issue) => !issue.labels.includes(PHOEBE_QUARANTINE_LABEL));
+  const sorted = [...eligible].sort(compareIssues);
+  return sorted.map((issue) => {
+    const nativeBlockers = nativeBlockersByIssue.get(issue.number) ?? [];
+    return {
+      issueNumber: issue.number,
+      blockedBy: issueBlockers(issue, nativeBlockers),
+      workable: resolveWorktreeBase(issue, blockerStates, phoebeBase, nativeBlockers) !== null,
+    };
+  });
 }
 
 export function stackedPrComment(
@@ -505,6 +545,42 @@ export function stackedCatchUpRetractionComment(blockerPrNumbers: readonly PrNum
   return (
     `Blockers ${list} merged; this branch has been caught up to \`main\` ` +
     `and is now independently mergeable.`
+  );
+}
+
+export type StackRetargetCandidate = {
+  prNumber: PrNumber;
+  baseRefName: BranchRef;
+};
+
+/**
+ * Open Phoebe PRs whose base is a native-stack blocker branch (#13) whose own
+ * PR has since merged. GitHub only auto-retargets a PR onto its grandparent
+ * when the base branch is *deleted*; tenant repos run
+ * `delete_branch_on_merge=false`, so a merged blocker's branch survives and
+ * nothing else ever moves its successor's base off it. `blockerStates` here is
+ * keyed by the blocker issue number parsed straight out of each candidate's
+ * `baseRefName` — the base branch name *is* the evidence of the native stack,
+ * independent of `blocked by` body/native refs.
+ */
+export function selectStackRetargetCandidates<T extends StackRetargetCandidate>(
+  prs: readonly T[],
+  blockerStates: ReadonlyMap<number, BlockerPrState>,
+): T[] {
+  return prs.filter((pr) => {
+    const blockerIssueNumber = parseIssueNumberFromBranch(pr.baseRefName);
+    if (blockerIssueNumber === null) {
+      return false;
+    }
+    return blockerStates.get(blockerIssueNumber)?.hasMergedPr === true;
+  });
+}
+
+/** Posted after a successor PR's base is moved from a merged blocker's branch to `defaultBranch` (#13). */
+export function stackRetargetedComment(defaultBranch: string): string {
+  return (
+    `Blocker merged; this PR's base has been retargeted to \`${defaultBranch}\` ` +
+    `so it can merge independently.`
   );
 }
 
@@ -1100,6 +1176,47 @@ export function checksFailureSignature(failingChecks: readonly FailingCheck[]): 
     return "checks-failed";
   }
   return slugifyFailureSignature(`checks-failed-${failingChecks.map((c) => c.name).join("-")}`);
+}
+
+/**
+ * Failure signature for an issue/research unit that ran and produced no PR
+ * (#22) — the verification command the agent's own report last failed on
+ * (e.g. `apply_patch`), so the cause is visible on the issue without
+ * container logs. Falls back to the agent's exit code, then a generic
+ * marker when neither signal is available (a clean exit with no commits).
+ */
+export function issueAttemptFailureSignature(opts: {
+  failedCommand?: string;
+  agentExitCode: number | null;
+}): string {
+  if (opts.failedCommand) {
+    return slugifyFailureSignature(`${opts.failedCommand}-failed`);
+  }
+  if (opts.agentExitCode !== null && opts.agentExitCode !== 0) {
+    return slugifyFailureSignature(`agent-exit-${opts.agentExitCode}`);
+  }
+  return "no-commit-produced";
+}
+
+/**
+ * Open issues that name `blockerIssueNumber` as a blocker (#22) — the
+ * dependents a quarantine comment names as "stays blocked", so the stalled
+ * chain is visible without walking the graph by hand.
+ */
+export function findBlockedDependents(
+  blockerIssueNumber: number,
+  issues: readonly Issue[],
+  nativeBlockersByIssue: NativeBlockerMap = new Map(),
+): number[] {
+  return issues
+    .filter(
+      (issue) =>
+        issue.number !== blockerIssueNumber &&
+        issueBlockers(issue, nativeBlockersByIssue.get(issue.number) ?? []).includes(
+          blockerIssueNumber,
+        ),
+    )
+    .map((issue) => issue.number);
 }
 
 export function conflictFixFailureComment(

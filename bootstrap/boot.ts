@@ -56,6 +56,7 @@ import {
   deploymentConfigFingerprint,
   superviseEngine,
   CRASH_BACKOFF_MS,
+  DEFAULT_RECONCILE_DRAIN_TIMEOUT_MS,
   DEFAULT_RECONCILE_INTERVAL_MS,
   type EngineExit,
   type EngineRun,
@@ -185,6 +186,17 @@ function engineBaseDir(): string {
 function reconcileIntervalMs(): number {
   const raw = Number(process.env["PHOEBE_RECONCILE_INTERVAL_MS"]);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_RECONCILE_INTERVAL_MS;
+}
+
+/**
+ * How long a reconcile-triggered drain (config/ref change) gets before boot
+ * escalates to SIGKILL (#23). `PHOEBE_RECONCILE_DRAIN_TIMEOUT_MS` overrides
+ * for a deployment whose `runTimeoutMs` (the engine's own whole-unit budget)
+ * is raised past the default bound.
+ */
+function reconcileDrainTimeoutMs(): number {
+  const raw = Number(process.env["PHOEBE_RECONCILE_DRAIN_TIMEOUT_MS"]);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_RECONCILE_DRAIN_TIMEOUT_MS;
 }
 
 /**
@@ -622,6 +634,7 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
         spawnSupervised(entry, argv, engine.resolvedConfiguration, observerEngineEnv(engine)),
       stop,
       intervalMs,
+      drainTimeoutMs: reconcileDrainTimeoutMs(),
       onRunEnd: (run) => {
         const outcome = runOutcome(run);
         if (outcome !== null) guard.record(outcome);
@@ -644,7 +657,13 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
         console.log(
           reason === "config"
             ? "[phoebe] boot: mounted config changed — draining the engine (SIGTERM) and relaunching."
-            : "[phoebe] boot: tracked ref advanced — draining the engine (SIGTERM) and relaunching.",
+            : "[phoebe] boot: tracked ref advanced — draining the engine (ref-change signal) and relaunching.",
+        ),
+      onDrainTimeout: (reason) =>
+        console.error(
+          `[phoebe] boot: the engine did not finish draining for a ${reason} change within ` +
+            `${Math.round(reconcileDrainTimeoutMs() / 1000)}s — escalating to SIGKILL so the ` +
+            `upgrade is not wedged.`,
         ),
       onLaunchError: (error) =>
         console.error(
