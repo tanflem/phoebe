@@ -4,11 +4,11 @@
 
 You are resolving **exactly** wayfinder research ticket **#{{ISSUE_NUMBER}}** — the orchestrator selected it before this run started. Do not pick a different ticket. It is a child of a `wayfinder:map` issue and carries the `{{RESEARCH_LABEL}}` label.
 
-!`gh issue view {{ISSUE_NUMBER}} --json number,title,body,labels,comments --jq '{number, title, body, labels: [.labels[].name], comments: [.comments[].body]}'`
+!`gh issue view {{ISSUE_NUMBER}} -R {{ISSUE_SOURCE_REPO_SLUG}} --json number,title,body,labels,comments --jq '{number, title, body, labels: [.labels[].name], comments: [.comments[].body]}'`
 
 ## Candidate parent maps
 
-!`gh issue list --label "wayfinder:map" --state open --json number,title --jq '[.[] | {number, title}]'`
+!`gh issue list --label "wayfinder:map" --state open -R {{ISSUE_SOURCE_REPO_SLUG}} --json number,title --jq '[.[] | {number, title}]'`
 
 # Task
 
@@ -33,18 +33,18 @@ You are Phoebe — resolving a **wayfinder research ticket** (an AFK ticket type
 6. **Resolve per wayfinder protocol:**
    1. **Post the resolution comment** on ticket #{{ISSUE_NUMBER}} — the answer itself, or the summary with a link to the committed doc/asset:
       ```
-      gh issue comment {{ISSUE_NUMBER}} --body "<answer + sources>"
+      gh issue comment {{ISSUE_NUMBER}} -R {{ISSUE_SOURCE_REPO_SLUG}} --body "<answer + sources>"
       ```
    2. **Close the ticket — but only in the issue-level-artifact case:**
       ```
-      gh issue close {{ISSUE_NUMBER}}
+      gh issue close {{ISSUE_NUMBER}} -R {{ISSUE_SOURCE_REPO_SLUG}}
       ```
-      If you committed a doc, **do not close it here** — the PR the host opens carries `Closes #{{ISSUE_NUMBER}}` and closes it on merge.
+      If you committed a doc, **do not close it here** — the PR the host opens carries `Closes {{ISSUE_REF}}` and closes it on merge.
    3. **Append a pointer to the map's `## Decisions so far`** — one line, referring to the ticket by name (never a bare number), gisting the answer so a future session can judge relevance and zoom the link for detail. Fetch the map body, add the line under that heading, and write it back:
       ```
       - [<ticket title>](<ticket url>) — <one-line gist of the answer>
       ```
-      Use `gh issue edit <map-number> --body-file -` with the amended body. Do not restate the full answer on the map — it is an index, not a store.
+      Use `gh issue edit <map-number> -R {{ISSUE_SOURCE_REPO_SLUG}} --body-file -` with the amended body. Do not restate the full answer on the map — it is an index, not a store.
 
 ## Rules
 

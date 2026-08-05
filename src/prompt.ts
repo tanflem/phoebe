@@ -50,10 +50,14 @@ export function buildDefaultPromptArgs(config: PhoebeConfig): PromptArgs {
     READY_COMMAND: config.readyCommand,
     DEFAULT_BRANCH: config.defaultBranch,
     BRANCH_PREFIX: config.branchPrefix,
-    READY_LABEL: config.readyLabel,
+    READY_LABEL: config.issueSource.readyLabel,
     RESEARCH_LABEL: config.researchLabel,
     PROCESSING_LABEL: config.processingLabel,
     REVIEWS_SUCCESS_HEADING: config.reviewsSuccessHeading,
+    // #21: the repo issues/comments/labels address, which may differ from the
+    // repo the agent's worktree is cloned from. Every `gh issue ...` call the
+    // default prompts run needs `-R {{ISSUE_SOURCE_REPO_SLUG}}` for that reason.
+    ISSUE_SOURCE_REPO_SLUG: config.issueSource.repoSlug,
   };
 }
 

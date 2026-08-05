@@ -88,6 +88,7 @@ import {
   filterBackoffEligible,
   followUpPrComment,
   formatFailingChecksForPrompt,
+  formatIssueRef,
   isReviewSummaryComment,
   issueBranch,
   isPrInScope,
@@ -190,9 +191,9 @@ const workOrder = validateWorkOrder(config.workOrder);
 // gh helpers — always pinned to the configured repo
 // ---------------------------------------------------------------------------
 
-function ghJson<T>(args: string[]): T {
+function ghJson<T>(args: string[], repo: string = config.repoSlug): T {
   return JSON.parse(
-    execFileSync("gh", [...args, "-R", config.repoSlug], {
+    execFileSync("gh", [...args, "-R", repo], {
       encoding: "utf8",
       timeout: CHILD_PROCESS_TIMEOUT_MS,
     }),
@@ -208,8 +209,8 @@ function ghApiJson<T>(endpoint: string): T {
   ) as T;
 }
 
-function gh(args: string[], opts?: { input?: string }): void {
-  execFileSync("gh", [...args, "-R", config.repoSlug], {
+function gh(args: string[], opts?: { input?: string }, repo: string = config.repoSlug): void {
+  execFileSync("gh", [...args, "-R", repo], {
     stdio: opts?.input !== undefined ? ["pipe", "inherit", "inherit"] : "inherit",
     timeout: CHILD_PROCESS_TIMEOUT_MS,
     ...(opts?.input !== undefined ? { input: opts.input } : {}),
@@ -270,23 +271,55 @@ function prepareNativeStackTooling(): void {
   }
 }
 
-/** Open issues carrying `label`, oldest-created first. Shared by `issues` and `research`. */
-function listIssuesWithLabel(label: string): Issue[] {
+/**
+ * Fail loudly at boot when the configured token cannot read the issue source
+ * repo (#21). The two repos may need different token scopes, so a bare `gh`
+ * failure the first time the poll loop tries to list issues is a worse first
+ * signal than a boot crash naming the repo. Only probes when `issueSource`
+ * actually points somewhere other than the work repo — the work repo's own
+ * reachability is already proven by `ensureClone` above.
+ */
+function verifyIssueSourceAccess(): void {
+  if (config.issueSource.repoSlug === config.repoSlug) return;
+  try {
+    execFileSync("gh", ["repo", "view", config.issueSource.repoSlug, "--json", "id"], {
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: CHILD_PROCESS_TIMEOUT_MS,
+    });
+  } catch (error) {
+    throw new Error(
+      `[phoebe] Cannot read issueSource repo "${config.issueSource.repoSlug}" with the ` +
+        `configured GH_TOKEN. The work repo and issue source may need different token ` +
+        `scopes — verify the token can read issues on the source repo. ` +
+        `(${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+}
+
+/**
+ * Open issues carrying `label`, oldest-created first. Shared by `issues` and
+ * `research`. Defaults to `issueSource.repoSlug` (#21) — the same repo as
+ * `repoSlug` unless the tenant configured a separate issue source.
+ */
+function listIssuesWithLabel(label: string, repo: string = config.issueSource.repoSlug): Issue[] {
   type GhIssue = Omit<Issue, "labels"> & { labels: Array<{ name: string }> };
-  return ghJson<GhIssue[]>([
-    "issue",
-    "list",
-    "--state",
-    "open",
-    "--label",
-    label,
-    "--limit",
-    "100",
-    "--search",
-    "sort:created-asc",
-    "--json",
-    "number,title,body,labels,createdAt",
-  ]).map((row) => ({
+  return ghJson<GhIssue[]>(
+    [
+      "issue",
+      "list",
+      "--state",
+      "open",
+      "--label",
+      label,
+      "--limit",
+      "100",
+      "--search",
+      "sort:created-asc",
+      "--json",
+      "number,title,body,labels,createdAt",
+    ],
+    repo,
+  ).map((row) => ({
     number: row.number,
     title: row.title,
     body: row.body,
@@ -296,7 +329,7 @@ function listIssuesWithLabel(label: string): Issue[] {
 }
 
 function listReadyIssues(): Issue[] {
-  return listIssuesWithLabel(config.readyLabel);
+  return listIssuesWithLabel(config.issueSource.readyLabel);
 }
 
 function listResearchIssues(): Issue[] {
@@ -324,16 +357,22 @@ function reclaimStaleClaims(runtimeId: string, opts: { forceOwnReclaim: boolean 
       forceOwnReclaim: opts.forceOwnReclaim,
     });
     if (reason === null) continue;
-    console.log(`[phoebe] Reclaiming #${issue.number} (${reason}) back to ${config.readyLabel}.`);
-    gh([
-      "issue",
-      "edit",
-      String(issue.number),
-      "--add-label",
-      config.readyLabel,
-      "--remove-label",
-      config.processingLabel,
-    ]);
+    console.log(
+      `[phoebe] Reclaiming #${issue.number} (${reason}) back to ${config.issueSource.readyLabel}.`,
+    );
+    gh(
+      [
+        "issue",
+        "edit",
+        String(issue.number),
+        "--add-label",
+        config.issueSource.readyLabel,
+        "--remove-label",
+        config.processingLabel,
+      ],
+      undefined,
+      config.issueSource.repoSlug,
+    );
     postIssueComment(issue.number, buildReclaimComment(reason));
   }
 }
@@ -383,7 +422,7 @@ function blockerPrState(blockerIssueNumber: number): BlockerPrState {
 function fetchNativeBlockers(issueNumber: number): Array<{ number: number; state: string }> {
   try {
     const rows = ghApiJson<Array<{ number: number; state: string }>>(
-      `repos/${config.repoSlug}/issues/${issueNumber}/dependencies/blocked_by`,
+      `repos/${config.issueSource.repoSlug}/issues/${issueNumber}/dependencies/blocked_by`,
     );
     return Array.isArray(rows) ? rows.map((row) => ({ number: row.number, state: row.state })) : [];
   } catch (error) {
@@ -497,7 +536,11 @@ function postOrUpdateComment(
 }
 
 function postIssueComment(issueNumber: number, body: string): void {
-  gh(["issue", "comment", String(issueNumber), "--body", body]);
+  gh(
+    ["issue", "comment", String(issueNumber), "--body", body],
+    undefined,
+    config.issueSource.repoSlug,
+  );
 }
 
 type OpenPhoebePr = {
@@ -609,18 +652,18 @@ function phoebeGhLogin(): string {
 }
 
 function issueBody(issueNumber: number): string {
-  return ghJson<{ body: string }>(["issue", "view", String(issueNumber), "--json", "body"]).body;
+  return ghJson<{ body: string }>(
+    ["issue", "view", String(issueNumber), "--json", "body"],
+    config.issueSource.repoSlug,
+  ).body;
 }
 
 /** All comment bodies on an issue, oldest first — the raw input to the #15 lease-marker lookup. */
 function fetchIssueCommentBodies(issueNumber: number): string[] {
-  const { comments } = ghJson<{ comments: Array<{ body: string }> }>([
-    "issue",
-    "view",
-    String(issueNumber),
-    "--json",
-    "comments",
-  ]);
+  const { comments } = ghJson<{ comments: Array<{ body: string }> }>(
+    ["issue", "view", String(issueNumber), "--json", "comments"],
+    config.issueSource.repoSlug,
+  );
   return comments.map((comment) => comment.body);
 }
 
@@ -781,15 +824,19 @@ function claimIssueLease(opts: {
       branch: opts.branch,
     }),
   );
-  gh([
-    "issue",
-    "edit",
-    String(opts.issueNumber),
-    "--add-label",
-    config.processingLabel,
-    "--remove-label",
-    config.readyLabel,
-  ]);
+  gh(
+    [
+      "issue",
+      "edit",
+      String(opts.issueNumber),
+      "--add-label",
+      config.processingLabel,
+      "--remove-label",
+      config.issueSource.readyLabel,
+    ],
+    undefined,
+    config.issueSource.repoSlug,
+  );
 }
 
 /**
@@ -1361,7 +1408,11 @@ async function runOneIssue(opts: {
     const agentExitCode = await runAgentInWorktree({
       worktreeDir,
       promptFile,
-      promptArgs: { ISSUE_NUMBER: String(issueNumber), VERIFICATION_RESULT_FILE: reportPath },
+      promptArgs: {
+        ISSUE_NUMBER: String(issueNumber),
+        ISSUE_REF: formatIssueRef(issueNumber, config.issueSource.repoSlug, config.repoSlug),
+        VERIFICATION_RESULT_FILE: reportPath,
+      },
     });
     const verification = readVerificationReport(reportPath);
 
@@ -1393,6 +1444,8 @@ async function runOneIssue(opts: {
         const prBody = buildInitialPrBody({
           issueNumber,
           commitCount: newCommitCount,
+          issueSourceRepoSlug: config.issueSource.repoSlug,
+          workRepoSlug: config.repoSlug,
           ...(plan.includeBanner &&
           blockerIssueNumber !== undefined &&
           blockerPrNumber !== undefined
@@ -1425,7 +1478,15 @@ async function runOneIssue(opts: {
         console.log(
           `[phoebe] PR #${existingPr} already exists for ${agentBranch} — posting follow-up note.`,
         );
-        postPrComment(existingPr, followUpPrComment(issueNumber, newCommitCount));
+        postPrComment(
+          existingPr,
+          followUpPrComment(
+            issueNumber,
+            newCommitCount,
+            config.issueSource.repoSlug,
+            config.repoSlug,
+          ),
+        );
       }
     } else {
       console.log("[phoebe] No commits — skipping PR creation.");
@@ -1930,7 +1991,7 @@ function logIdleCycle(data: CycleWorkData): string {
     data.issues.length > 0 &&
     !selectIssue(data.issues, data.blockerStates, phoebeBase, data.nativeBlockersByIssue)
   ) {
-    const reason = `${data.issues.length} ${config.readyLabel} issue(s) but none workable this cycle (blocked or waiting on blocker PR).`;
+    const reason = `${data.issues.length} ${config.issueSource.readyLabel} issue(s) but none workable this cycle (blocked or waiting on blocker PR).`;
     console.log(`[phoebe] ${reason}`);
     return reason;
   }
@@ -2145,6 +2206,10 @@ export async function runEngine(argv: readonly string[] = process.argv.slice(2))
     if (config.stackMode === "native") {
       prepareNativeStackTooling();
     }
+    // #21: prove the token can read the issue source before the loop's first
+    // discovery call hits it — a clearer boot failure than a bare gh error
+    // mid-cycle.
+    verifyIssueSourceAccess();
     // #15 startup self-recovery: a fresh process start is proof any claim this
     // persisted runtime id still holds is dead (it cannot still be mid-run),
     // so reclaim those unconditionally rather than waiting out the lease TTL.

@@ -81,6 +81,65 @@ describe("validateUserConfig", () => {
       ),
     ).not.toThrow();
   });
+
+  test("accepts an omitted issueSource", () => {
+    expect(() => validateUserConfig(minimalUserConfig())).not.toThrow();
+  });
+
+  test("accepts issueSource with just repoSlug", () => {
+    expect(() =>
+      validateUserConfig(minimalUserConfig({ issueSource: { repoSlug: "acme/planning" } })),
+    ).not.toThrow();
+  });
+
+  test("accepts issueSource with repoSlug and readyLabel", () => {
+    expect(() =>
+      validateUserConfig(
+        minimalUserConfig({
+          issueSource: { repoSlug: "acme/planning", readyLabel: "triaged" },
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  test("rejects issueSource with an empty repoSlug", () => {
+    expect(() =>
+      validateUserConfig(minimalUserConfig({ issueSource: { repoSlug: "  " } })),
+    ).toThrow(/issueSource\.repoSlug/);
+  });
+
+  test("rejects a non-object issueSource", () => {
+    expect(() =>
+      validateUserConfig(
+        minimalUserConfig({
+          issueSource: "acme/planning" as unknown as PhoebeUserConfig["issueSource"],
+        }),
+      ),
+    ).toThrow(/issueSource must be an object/);
+  });
+
+  test("rejects issueSource with unknown fields", () => {
+    expect(() =>
+      validateUserConfig(
+        minimalUserConfig({
+          issueSource: {
+            repoSlug: "acme/planning",
+            processingLabel: "nope",
+          } as unknown as PhoebeUserConfig["issueSource"],
+        }),
+      ),
+    ).toThrow(/issueSource has unknown field/);
+  });
+
+  test("rejects a non-string issueSource.readyLabel", () => {
+    expect(() =>
+      validateUserConfig(
+        minimalUserConfig({
+          issueSource: { repoSlug: "acme/planning", readyLabel: 7 as unknown as string },
+        }),
+      ),
+    ).toThrow(/issueSource\.readyLabel/);
+  });
 });
 
 describe("resolveConfig", () => {
@@ -222,5 +281,44 @@ describe("resolveConfig", () => {
       Number(m[1]),
     );
     expect(matches).toEqual([42, 7]);
+  });
+
+  describe("issueSource (#21)", () => {
+    test("defaults to the work repo and readyLabel when omitted", () => {
+      const resolved = resolveConfig(minimalUserConfig());
+      expect(resolved.issueSource).toEqual({
+        repoSlug: resolved.repoSlug,
+        readyLabel: resolved.readyLabel,
+      });
+    });
+
+    test("still defaults to the work repo when only readyLabel is overridden", () => {
+      const resolved = resolveConfig(minimalUserConfig({ readyLabel: "green-light" }));
+      expect(resolved.issueSource).toEqual({
+        repoSlug: "acme/widget",
+        readyLabel: "green-light",
+      });
+    });
+
+    test("honors an explicit issueSource repoSlug", () => {
+      const resolved = resolveConfig(
+        minimalUserConfig({ issueSource: { repoSlug: "acme/planning" } }),
+      );
+      expect(resolved.issueSource.repoSlug).toBe("acme/planning");
+      // readyLabel falls back to the tenant's own readyLabel, per the issue's
+      // "defaults to the tenant's readyLabel" contract.
+      expect(resolved.issueSource.readyLabel).toBe(resolved.readyLabel);
+    });
+
+    test("honors an explicit issueSource readyLabel independent of the tenant's own", () => {
+      const resolved = resolveConfig(
+        minimalUserConfig({
+          readyLabel: "green-light",
+          issueSource: { repoSlug: "acme/planning", readyLabel: "triaged" },
+        }),
+      );
+      expect(resolved.issueSource).toEqual({ repoSlug: "acme/planning", readyLabel: "triaged" });
+      expect(resolved.readyLabel).toBe("green-light");
+    });
   });
 });

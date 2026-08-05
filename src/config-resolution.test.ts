@@ -83,6 +83,22 @@ describe("resolveLayeredConfiguration", () => {
     });
   });
 
+  test("honors issueSource from the repository declaration (#21)", () => {
+    const resolved = resolveLayeredConfiguration({
+      base: { readyLabel: "base-ready" },
+      repository: repositoryConfig({
+        issueSource: { repoSlug: "acme/planning", readyLabel: "triaged" },
+      }),
+    });
+    expect(resolved.config.issueSource).toEqual({
+      repoSlug: "acme/planning",
+      readyLabel: "triaged",
+    });
+    // Unrelated to the work repo's own identity or discovery label.
+    expect(resolved.config.repoSlug).toBe("acme/widget");
+    expect(resolved.config.readyLabel).toBe("base-ready");
+  });
+
   test("requires the five repository-owned fields from the repository declaration", () => {
     const repository = repositoryConfig() as Record<string, unknown>;
     delete repository.repoSlug;
@@ -175,6 +191,16 @@ describe("parseBaseConfigDocument", () => {
       "invalid stackMode",
       JSON.stringify({ schemaVersion: 1, config: { stackMode: "bogus" } }),
       /(?=.*config\.stackMode must be one of)(?=.*generated-base\.json)/i,
+    ],
+    [
+      // issueSource names a specific repo (#21), same as repoSlug — out of
+      // place in the deployment-wide generated base.
+      "issueSource field",
+      JSON.stringify({
+        schemaVersion: 1,
+        config: { issueSource: { repoSlug: "managed/planning" } },
+      }),
+      /(?=.*must not define)(?=.*issueSource)(?=.*generated-base\.json)/i,
     ],
   ])("rejects %s with a path-specific error", (_name, json, expected) => {
     expect(() => parseBaseConfigDocument(json, path)).toThrow(expected);

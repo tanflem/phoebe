@@ -54,7 +54,10 @@ base branch rather than `defaultBranch`.
 
 The producer. Selection (`selectIssue`):
 
-1. List open issues labelled `readyLabel`, oldest-created first.
+1. List open issues labelled `issueSource.readyLabel` (defaults to
+   `readyLabel` on the work repo — see
+   [`configuration.md`](configuration.md#issue-source-issuesource)), oldest-created
+   first.
 2. Sort by **priority** then age then number. Priority is inferred from the
    title + body text: `bug` (bug/broken/crash/regression/fix) → `tracer`
    (tracer/wire/poc) → `polish` (default) → `refactor`.

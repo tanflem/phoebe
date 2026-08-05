@@ -199,12 +199,37 @@ export function selectIssue(
   return null;
 }
 
-export function stackedPrComment(blockerIssueNumber: number, blockerPrNumber: PrNumber): string {
+/**
+ * Format a GitHub issue reference for text that may be posted in a different
+ * repo than the issue itself (PR bodies, follow-up comments, #21). A bare
+ * `#N` only resolves correctly when read from the issue's own repo; once
+ * `issueSource` diverges from the work repo, the same text lives in the work
+ * repo's PRs, so it must spell out `owner/repo#N` instead. Omitting either
+ * repo slug (or passing matching ones) preserves the historical bare `#N`.
+ */
+export function formatIssueRef(
+  issueNumber: number,
+  issueSourceRepoSlug?: string,
+  workRepoSlug?: string,
+): string {
+  if (issueSourceRepoSlug === undefined || issueSourceRepoSlug === workRepoSlug) {
+    return `#${issueNumber}`;
+  }
+  return `${issueSourceRepoSlug}#${issueNumber}`;
+}
+
+export function stackedPrComment(
+  blockerIssueNumber: number,
+  blockerPrNumber: PrNumber,
+  issueSourceRepoSlug?: string,
+  workRepoSlug?: string,
+): string {
+  const issueRef = formatIssueRef(blockerIssueNumber, issueSourceRepoSlug, workRepoSlug);
   return (
-    `⛓️ Blocked by #${blockerIssueNumber} (PR #${blockerPrNumber}). ` +
+    `⛓️ Blocked by ${issueRef} (PR #${blockerPrNumber}). ` +
     `Its commits appear in this diff until #${blockerPrNumber} merges. ` +
     `**Do not merge this PR before #${blockerPrNumber}** — doing so would pull ` +
-    `#${blockerIssueNumber}'s work into \`main\` ahead of its own review.`
+    `${issueRef}'s work into \`main\` ahead of its own review.`
   );
 }
 
@@ -1150,16 +1175,33 @@ export function buildInitialPrBody(opts: {
   issueNumber: number;
   commitCount: number;
   stacked?: { blockerIssueNumber: number; blockerPrNumber: PrNumber };
+  issueSourceRepoSlug?: string;
+  workRepoSlug?: string;
 }): string {
-  const parts = [`Closes #${opts.issueNumber}`, "", "Automated PR from Phoebe.", ""];
+  const issueRef = formatIssueRef(opts.issueNumber, opts.issueSourceRepoSlug, opts.workRepoSlug);
+  const parts = [`Closes ${issueRef}`, "", "Automated PR from Phoebe.", ""];
   if (opts.stacked) {
-    parts.push(stackedPrComment(opts.stacked.blockerIssueNumber, opts.stacked.blockerPrNumber), "");
+    parts.push(
+      stackedPrComment(
+        opts.stacked.blockerIssueNumber,
+        opts.stacked.blockerPrNumber,
+        opts.issueSourceRepoSlug,
+        opts.workRepoSlug,
+      ),
+      "",
+    );
   }
   parts.push(`Commits: ${opts.commitCount}`);
   return parts.join("\n");
 }
 
 /** Incremental note for follow-up pushes — no stacked-PR banner. */
-export function followUpPrComment(issueNumber: number, commitCount: number): string {
-  return `Phoebe update for #${issueNumber}: ${commitCount} new commit(s) pushed to this branch.`;
+export function followUpPrComment(
+  issueNumber: number,
+  commitCount: number,
+  issueSourceRepoSlug?: string,
+  workRepoSlug?: string,
+): string {
+  const issueRef = formatIssueRef(issueNumber, issueSourceRepoSlug, workRepoSlug);
+  return `Phoebe update for ${issueRef}: ${commitCount} new commit(s) pushed to this branch.`;
 }

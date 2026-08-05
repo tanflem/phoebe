@@ -28,8 +28,19 @@ const REQUIRED_REPOSITORY_FIELDS = [
   "testCommand",
 ] as const;
 
+// Optional fields that still identify *which* repo something is, same as the
+// required fields above — so they are equally out of place in the generated,
+// deployment-wide base document (#21: issueSource names a specific repo).
+const OPTIONAL_REPOSITORY_OWNED_FIELDS = ["issueSource"] as const;
+
+const REPOSITORY_OWNED_FIELDS = [
+  ...REQUIRED_REPOSITORY_FIELDS,
+  ...OPTIONAL_REPOSITORY_OWNED_FIELDS,
+] as const;
+
 const CONFIG_FIELDS = [
   ...REQUIRED_REPOSITORY_FIELDS,
+  ...OPTIONAL_REPOSITORY_OWNED_FIELDS,
   "engine",
   "defaultBranch",
   "branchPrefix",
@@ -52,7 +63,7 @@ const CONFIG_FIELDS = [
 ] as const satisfies readonly (keyof PhoebeUserConfig)[];
 
 const BASE_CONFIG_FIELDS = CONFIG_FIELDS.filter(
-  (field) => !(REQUIRED_REPOSITORY_FIELDS as readonly string[]).includes(field),
+  (field) => !(REPOSITORY_OWNED_FIELDS as readonly string[]).includes(field),
 );
 
 const STRING_FIELDS = [
@@ -74,7 +85,10 @@ const NESTED_STRING_FIELDS = {
 } as const;
 
 export type PhoebeBaseConfig = Partial<
-  Omit<PhoebeUserConfig, "repoSlug" | "repoUrl" | "installCommand" | "checkCommand" | "testCommand">
+  Omit<
+    PhoebeUserConfig,
+    "repoSlug" | "repoUrl" | "installCommand" | "checkCommand" | "testCommand" | "issueSource"
+  >
 >;
 
 export type ResolvedConfiguration = {
@@ -138,7 +152,7 @@ function validateNestedStringRecord(
 }
 
 function validateBaseConfig(config: JsonRecord, path: string): asserts config is PhoebeBaseConfig {
-  const prohibited = REQUIRED_REPOSITORY_FIELDS.filter((field) => field in config);
+  const prohibited = REPOSITORY_OWNED_FIELDS.filter((field) => field in config);
   if (prohibited.length > 0) {
     throw new Error(
       describePath(

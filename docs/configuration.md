@@ -137,6 +137,54 @@ does not force you to supply the rest.
 
 See [`operating.md`](operating.md) for how a human drives Phoebe with these.
 
+## Issue source (`issueSource`)
+
+```ts
+issueSource?: {
+  repoSlug: string;
+  readyLabel?: string; // defaults to the tenant's own readyLabel
+};
+```
+
+`repoSlug` is simultaneously the issue source, the clone target, the PR
+target, and the status identity. `issueSource` splits the first of those out:
+when a team's planning tracker is a separate repo from its codebase (or a
+monorepo files work centrally), point Phoebe's discovery at that repo while
+code still lands in `repoSlug`.
+
+Omitted ⇒ `{ repoSlug: <repoSlug>, readyLabel: <readyLabel> }` — issues are
+discovered and worked exactly as if there were one repo, unchanged from
+before this field existed. Set it and the split is:
+
+- **Issue source** (`issueSource.repoSlug`, `issueSource.readyLabel`) — issue
+  discovery, blocker resolution (`blockedByPattern` body reads and the native
+  dependencies API), label transitions (`readyLabel` ↔ `processingLabel`),
+  claim/release comments, and the `research` kind's ticket queue.
+- **Work target** (`repoSlug`) — clone, worktree, branch, PR, and status
+  identity (`phoebe status`, `unit-event` tenant tag) are unaffected.
+
+`researchLabel` and `processingLabel` are not split — they stay on the
+tenant's top-level fields but apply to issues on `issueSource.repoSlug` once
+it is set, same as `readyLabel` does by default.
+
+A PR's body still needs to close the issue that spawned it, but a bare
+`Closes #N` only resolves in the repo the PR lives in. Once `issueSource`
+diverges from `repoSlug`, Phoebe renders `Closes <owner>/<repo>#N` instead —
+see `formatIssueRef` in `src/orchestrator.ts`. The default prompts
+(`prompts/issues-prompt.md`, `prompts/research-prompt.md`) receive
+`{{ISSUE_SOURCE_REPO_SLUG}}` and address every `gh issue ...` call at it with
+`-R`; `blockedBy` numbers referenced in issue bodies are source-repo numbers.
+
+`repoSlug` and `issueSource` may need different token scopes on `GH_TOKEN`.
+Boot fails with a clear error naming the repo if the token cannot read
+`issueSource.repoSlug` — see `verifyIssueSourceAccess` in `src/main.ts`.
+
+`issueSource` is repository-owned, like `repoSlug`: it may only be set in a
+tenant's own `phoebe.config.ts`, not in the shared `PHOEBE_BASE_CONFIG`
+generated layer (see [Multiple repos](#multiple-repos-nested-tenants) below).
+It is not `PHOEBE_*`-overlayable — nested records stay config-file territory,
+same as `promptFiles` and `defaultModels`.
+
 ## PR-scan scope
 
 The `conflicts` / `checks` / `reviews` work kinds scan open PRs. Two fields

@@ -19,6 +19,7 @@ import {
   filterBackoffEligible,
   followUpPrComment,
   formatFailingChecksForPrompt,
+  formatIssueRef,
   hasNewNonPhoebeReviewActivity,
   isPhoebeHeadBranch,
   isPrInScope,
@@ -408,6 +409,24 @@ describe("stackedPrComment", () => {
     expect(comment).toContain("#98");
     expect(comment).toContain("PR #104");
     expect(comment).toContain("Do not merge");
+  });
+
+  test("uses a cross-repo issue reference when issueSource diverges (#21)", () => {
+    const comment = stackedPrComment(98, asPrNumber(104), "acme/planning", "acme/widget");
+    expect(comment).toContain("acme/planning#98");
+    expect(comment).toContain("PR #104");
+    expect(comment).not.toContain("Blocked by #98");
+  });
+});
+
+describe("formatIssueRef", () => {
+  test("renders a bare #N when issueSource is omitted or matches the work repo", () => {
+    expect(formatIssueRef(21)).toBe("#21");
+    expect(formatIssueRef(21, "acme/widget", "acme/widget")).toBe("#21");
+  });
+
+  test("renders owner/repo#N when issueSource diverges from the work repo", () => {
+    expect(formatIssueRef(21, "acme/planning", "acme/widget")).toBe("acme/planning#21");
   });
 });
 
@@ -1175,6 +1194,28 @@ describe("buildInitialPrBody", () => {
     expect(body).toContain("Blocked by #98");
     expect(body).toContain("Commits: 2");
   });
+
+  test("links the source issue cross-repo when issueSource diverges (#21)", () => {
+    const body = buildInitialPrBody({
+      issueNumber: 103,
+      commitCount: 2,
+      stacked: { blockerIssueNumber: 98, blockerPrNumber: asPrNumber(104) },
+      issueSourceRepoSlug: "acme/planning",
+      workRepoSlug: "acme/widget",
+    });
+    expect(body).toContain("Closes acme/planning#103");
+    expect(body).toContain("Blocked by acme/planning#98");
+  });
+
+  test("stays bare #N when issueSource matches the work repo", () => {
+    const body = buildInitialPrBody({
+      issueNumber: 103,
+      commitCount: 2,
+      issueSourceRepoSlug: "acme/widget",
+      workRepoSlug: "acme/widget",
+    });
+    expect(body).toContain("Closes #103");
+  });
 });
 
 describe("followUpPrComment", () => {
@@ -1185,6 +1226,11 @@ describe("followUpPrComment", () => {
     expect(comment).not.toContain("Blocked by");
     expect(comment).not.toContain("Do not merge");
     expect(comment).not.toContain("Closes #");
+  });
+
+  test("links the source issue cross-repo when issueSource diverges (#21)", () => {
+    const comment = followUpPrComment(103, 2, "acme/planning", "acme/widget");
+    expect(comment).toContain("acme/planning#103");
   });
 });
 

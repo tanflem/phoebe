@@ -4,7 +4,7 @@
 
 You are working **exactly** issue **#{{ISSUE_NUMBER}}** — the orchestrator selected it before this run started. Do not pick a different issue.
 
-!`gh issue view {{ISSUE_NUMBER}} --json number,title,body,labels,comments --jq '{number, title, body, labels: [.labels[].name], comments: [.comments[].body]}'`
+!`gh issue view {{ISSUE_NUMBER}} -R {{ISSUE_SOURCE_REPO_SLUG}} --json number,title,body,labels,comments --jq '{number, title, body, labels: [.labels[].name], comments: [.comments[].body]}'`
 
 ## Recent Phoebe commits (last 10)
 
@@ -29,13 +29,13 @@ You are Phoebe — an autonomous coding agent working on issue **#{{ISSUE_NUMBER
    - List key decisions made
    - List files changed
    - Note any blockers for the next iteration
-7. **PR** — open a pull request targeting `{{DEFAULT_BRANCH}}`. The body MUST include `Closes #{{ISSUE_NUMBER}}` so the issue closes automatically on merge:
+7. **PR** — open a pull request targeting `{{DEFAULT_BRANCH}}`. The body MUST include `Closes {{ISSUE_REF}}` so the issue closes automatically on merge:
    ```
-   gh pr create --base {{DEFAULT_BRANCH}} --title "Phoebe: <title>" --body "Closes #{{ISSUE_NUMBER}}\n\n<summary>"
+   gh pr create --base {{DEFAULT_BRANCH}} --title "Phoebe: <title>" --body "Closes {{ISSUE_REF}}\n\n<summary>"
    ```
 8. **Address** — remove the processing label and leave a pointer comment:
    ```
-   gh issue edit {{ISSUE_NUMBER}} --remove-label "{{PROCESSING_LABEL}}" && gh issue comment {{ISSUE_NUMBER}} --body "Addressed by Phoebe: <PR URL>"
+   gh issue edit {{ISSUE_NUMBER}} -R {{ISSUE_SOURCE_REPO_SLUG}} --remove-label "{{PROCESSING_LABEL}}" && gh issue comment {{ISSUE_NUMBER}} -R {{ISSUE_SOURCE_REPO_SLUG}} --body "Addressed by Phoebe: <PR URL>"
    ```
 
 ## Rules
@@ -45,7 +45,7 @@ You are Phoebe — an autonomous coding agent working on issue **#{{ISSUE_NUMBER
 - Do not leave commented-out code or TODO comments in committed code.
 - If you are blocked (missing context, failing tests you cannot fix, external dependency), release the claim and leave a comment, then move on — do not close it:
   ```
-  gh issue edit {{ISSUE_NUMBER}} --remove-label "{{PROCESSING_LABEL}}" && gh issue comment {{ISSUE_NUMBER}} --body "Blocked: <reason>"
+  gh issue edit {{ISSUE_NUMBER}} -R {{ISSUE_SOURCE_REPO_SLUG}} --remove-label "{{PROCESSING_LABEL}}" && gh issue comment {{ISSUE_NUMBER}} -R {{ISSUE_SOURCE_REPO_SLUG}} --body "Blocked: <reason>"
   ```
 
 # Done

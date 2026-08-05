@@ -71,7 +71,22 @@ describe("buildDefaultPromptArgs", () => {
       READY_LABEL: "ready-for-agent",
       PROCESSING_LABEL: "processing",
       REVIEWS_SUCCESS_HEADING: "## Review feedback addressed",
+      ISSUE_SOURCE_REPO_SLUG: "acme/widget",
     });
+  });
+
+  test("READY_LABEL and ISSUE_SOURCE_REPO_SLUG follow issueSource when configured (#21)", () => {
+    const user: PhoebeUserConfig = {
+      repoSlug: "acme/widget",
+      repoUrl: "https://github.com/acme/widget.git",
+      installCommand: "npm ci",
+      checkCommand: "npm run check",
+      testCommand: "npm test",
+      issueSource: { repoSlug: "acme/planning", readyLabel: "triaged" },
+    };
+    const args = buildDefaultPromptArgs(resolveConfig(user));
+    expect(args["ISSUE_SOURCE_REPO_SLUG"]).toBe("acme/planning");
+    expect(args["READY_LABEL"]).toBe("triaged");
   });
 });
 
@@ -81,7 +96,19 @@ describe("shipped default prompts", () => {
   const cases = [
     {
       file: "issues-prompt.md",
-      extra: { ISSUE_NUMBER: "42", VERIFICATION_RESULT_FILE: "/tmp/report.json" },
+      extra: {
+        ISSUE_NUMBER: "42",
+        ISSUE_REF: "#42",
+        VERIFICATION_RESULT_FILE: "/tmp/report.json",
+      },
+    },
+    {
+      file: "research-prompt.md",
+      extra: {
+        ISSUE_NUMBER: "42",
+        ISSUE_REF: "#42",
+        VERIFICATION_RESULT_FILE: "/tmp/report.json",
+      },
     },
     {
       file: "conflict-prompt.md",
@@ -131,6 +158,8 @@ describe("shipped default prompts", () => {
     expect(template).toContain("{{PROCESSING_LABEL}}");
     expect(template).toContain("{{READY_LABEL}}");
     expect(template).toContain("{{DEFAULT_BRANCH}}");
+    expect(template).toContain("{{ISSUE_SOURCE_REPO_SLUG}}");
+    expect(template).toContain("{{ISSUE_REF}}");
   });
 
   test("checks + conflict prompts document the baseline-breakage branch", () => {

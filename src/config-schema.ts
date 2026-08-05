@@ -100,6 +100,20 @@ export function validateEngineSourceField(
   }
 }
 
+/**
+ * Where issues are discovered, labeled, and commented on, when it differs
+ * from the repo being worked (#21) — e.g. a team whose planning tracker is a
+ * separate repo from its codebase. `readyLabel` defaults to the tenant's own
+ * `readyLabel` when omitted. Discovery, blocker resolution, label
+ * transitions, claim/release comments, and the research queue all address
+ * this repo; clone, worktree, branch, PR, and status identity stay on
+ * `repoSlug` regardless.
+ */
+export type IssueSourceConfig = {
+  repoSlug: string;
+  readyLabel?: string;
+};
+
 export type PromptFilesConfig = {
   issue: string;
   conflict: string;
@@ -128,6 +142,15 @@ export type PhoebeConfig = {
   branchPrefix: string;
   /** Label marking issues Phoebe may pick up. */
   readyLabel: string;
+  /**
+   * Resolved issue-discovery target — always populated, defaulting to
+   * `{ repoSlug, readyLabel }` when the user omits `issueSource` entirely, so
+   * every call site can read `config.issueSource.*` unconditionally (#21).
+   */
+  issueSource: {
+    repoSlug: string;
+    readyLabel: string;
+  };
   /** Label marking wayfinder research tickets the `research` work kind picks up. */
   researchLabel: string;
   /** Label the agent applies to an issue it has claimed and is working. */
@@ -243,6 +266,8 @@ export type PhoebeUserConfig = {
   defaultBranch?: string;
   branchPrefix?: string;
   readyLabel?: string;
+  /** Split issue discovery from the work repo (#21). Omitted ⇒ same repo. */
+  issueSource?: IssueSourceConfig;
   researchLabel?: string;
   processingLabel?: string;
   prScope?: PhoebeConfig["prScope"];
@@ -406,6 +431,30 @@ export function validateUserConfig(user: PhoebeUserConfig): void {
       );
     }
   }
+  if (user.issueSource !== undefined) {
+    if (
+      user.issueSource === null ||
+      typeof user.issueSource !== "object" ||
+      Array.isArray(user.issueSource)
+    ) {
+      throw new Error(
+        `phoebe.config.ts issueSource must be an object of the form { repoSlug, readyLabel? }.`,
+      );
+    }
+    const { repoSlug, readyLabel, ...rest } = user.issueSource as Record<string, unknown>;
+    const unknownKeys = Object.keys(rest);
+    if (unknownKeys.length > 0) {
+      throw new Error(
+        `phoebe.config.ts issueSource has unknown field(s): ${unknownKeys.join(", ")}.`,
+      );
+    }
+    if (typeof repoSlug !== "string" || repoSlug.trim().length === 0) {
+      throw new Error(`phoebe.config.ts issueSource.repoSlug must be a non-empty string.`);
+    }
+    if (readyLabel !== undefined && typeof readyLabel !== "string") {
+      throw new Error(`phoebe.config.ts issueSource.readyLabel must be a string.`);
+    }
+  }
 }
 
 /**
@@ -423,6 +472,7 @@ export function resolveConfig(
   opts: { dataBase?: string } = {},
 ): PhoebeConfig {
   validateUserConfig(user);
+  const readyLabel = user.readyLabel ?? CONFIG_DEFAULTS.readyLabel;
   return {
     repoSlug: user.repoSlug,
     repoUrl: user.repoUrl,
@@ -431,7 +481,11 @@ export function resolveConfig(
     testCommand: user.testCommand,
     defaultBranch: user.defaultBranch ?? CONFIG_DEFAULTS.defaultBranch,
     branchPrefix: user.branchPrefix ?? CONFIG_DEFAULTS.branchPrefix,
-    readyLabel: user.readyLabel ?? CONFIG_DEFAULTS.readyLabel,
+    readyLabel,
+    issueSource: {
+      repoSlug: user.issueSource?.repoSlug ?? user.repoSlug,
+      readyLabel: user.issueSource?.readyLabel ?? readyLabel,
+    },
     researchLabel: user.researchLabel ?? CONFIG_DEFAULTS.researchLabel,
     processingLabel: user.processingLabel ?? CONFIG_DEFAULTS.processingLabel,
     prScope: user.prScope ?? CONFIG_DEFAULTS.prScope,
