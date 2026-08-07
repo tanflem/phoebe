@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { CONFIG_DEFAULTS, resolveConfig, type PhoebeUserConfig } from "./config-schema.ts";
 import {
+  assertConfigFieldsCoversDefaults,
   formatResolvedConfiguration,
   loadResolvedConfiguration,
   parseBaseConfigDocument,
@@ -112,8 +113,40 @@ describe("resolveLayeredConfiguration", () => {
   });
 });
 
+describe("CONFIG_FIELDS", () => {
+  test("covers every field CONFIG_DEFAULTS supplies (#36)", () => {
+    expect(() => assertConfigFieldsCoversDefaults()).not.toThrow();
+  });
+});
+
 describe("parseBaseConfigDocument", () => {
   const path = "/etc/phoebe/generated-base.json";
+
+  test("accepts the previously-drifted fields (#36)", () => {
+    expect(
+      parseBaseConfigDocument(
+        JSON.stringify({
+          schemaVersion: 1,
+          config: {
+            prAuthors: ["octocat"],
+            prBaseScope: "all",
+            runTimeoutMs: 60_000,
+            maxUnitTimeouts: 5,
+            maxUnitAttempts: 2,
+            leaseTtlMs: 120_000,
+          },
+        }),
+        path,
+      ),
+    ).toEqual({
+      prAuthors: ["octocat"],
+      prBaseScope: "all",
+      runTimeoutMs: 60_000,
+      maxUnitTimeouts: 5,
+      maxUnitAttempts: 2,
+      leaseTtlMs: 120_000,
+    });
+  });
 
   test("accepts the supported version and optional config fields", () => {
     expect(
@@ -191,6 +224,21 @@ describe("parseBaseConfigDocument", () => {
       "invalid stackMode",
       JSON.stringify({ schemaVersion: 1, config: { stackMode: "bogus" } }),
       /(?=.*config\.stackMode must be one of)(?=.*generated-base\.json)/i,
+    ],
+    [
+      "invalid prBaseScope",
+      JSON.stringify({ schemaVersion: 1, config: { prBaseScope: "bogus" } }),
+      /(?=.*config\.prBaseScope must be)(?=.*generated-base\.json)/i,
+    ],
+    [
+      "non-array prAuthors",
+      JSON.stringify({ schemaVersion: 1, config: { prAuthors: "octocat" } }),
+      /(?=.*config\.prAuthors must be an array of strings)(?=.*generated-base\.json)/i,
+    ],
+    [
+      "non-numeric runTimeoutMs",
+      JSON.stringify({ schemaVersion: 1, config: { runTimeoutMs: "60000" } }),
+      /(?=.*config\.runTimeoutMs must be a number)(?=.*generated-base\.json)/i,
     ],
     [
       // issueSource names a specific repo (#21), same as repoSlug — out of

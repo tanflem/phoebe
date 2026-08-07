@@ -10,6 +10,7 @@ import {
   BLOCKER_SOURCES,
   STACK_MODES,
   PROVIDER_NAMES,
+  CONFIG_DEFAULTS,
   resolveConfig,
   validateEngineSourceField,
   validateUserConfig,
@@ -48,6 +49,8 @@ const CONFIG_FIELDS = [
   "researchLabel",
   "processingLabel",
   "prScope",
+  "prAuthors",
+  "prBaseScope",
   "draftPrs",
   "prOptOutLabel",
   "readyCommand",
@@ -60,7 +63,28 @@ const CONFIG_FIELDS = [
   "defaultProvider",
   "defaultModels",
   "providerEnv",
+  "runTimeoutMs",
+  "maxUnitTimeouts",
+  "maxUnitAttempts",
+  "leaseTtlMs",
 ] as const satisfies readonly (keyof PhoebeUserConfig)[];
+
+/**
+ * Every optional field `CONFIG_DEFAULTS` supplies must also be in
+ * `CONFIG_FIELDS`, or a generated base config setting it is rejected as
+ * unknown even though `resolveConfig` fully supports it (#36). `engine` has no
+ * static default (bootstrap-only, dropped by `resolveConfig`) and is exempt.
+ */
+export function assertConfigFieldsCoversDefaults(): void {
+  const covered = new Set<string>(CONFIG_FIELDS);
+  const missing = Object.keys(CONFIG_DEFAULTS).filter((field) => !covered.has(field));
+  if (missing.length > 0) {
+    throw new Error(
+      `CONFIG_FIELDS is missing field(s) present in CONFIG_DEFAULTS: ${missing.join(", ")}. ` +
+        `Add them to CONFIG_FIELDS in src/config-resolution.ts.`,
+    );
+  }
+}
 
 const BASE_CONFIG_FIELDS = CONFIG_FIELDS.filter(
   (field) => !(REPOSITORY_OWNED_FIELDS as readonly string[]).includes(field),
@@ -77,6 +101,8 @@ const STRING_FIELDS = [
   "blockedByPattern",
   "reviewsSuccessHeading",
 ] as const;
+
+const NUMBER_FIELDS = ["runTimeoutMs", "maxUnitTimeouts", "maxUnitAttempts", "leaseTtlMs"] as const;
 
 const NESTED_STRING_FIELDS = {
   promptFiles: ["issue", "conflict", "checks", "reviews", "research"],
@@ -136,6 +162,12 @@ function assertString(value: unknown, location: string, path: string): asserts v
   }
 }
 
+function assertNumber(value: unknown, location: string, path: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(describePath(path, `${location} must be a number.`));
+  }
+}
+
 function validateNestedStringRecord(
   value: unknown,
   field: keyof typeof NESTED_STRING_FIELDS,
@@ -168,12 +200,33 @@ function validateBaseConfig(config: JsonRecord, path: string): asserts config is
     if (value !== undefined) assertString(value, `config.${field}`, path);
   }
 
+  for (const field of NUMBER_FIELDS) {
+    const value = config[field];
+    if (value !== undefined) assertNumber(value, `config.${field}`, path);
+  }
+
+  if (config["prAuthors"] !== undefined) {
+    if (
+      !Array.isArray(config["prAuthors"]) ||
+      !config["prAuthors"].every((value) => typeof value === "string")
+    ) {
+      throw new Error(describePath(path, "config.prAuthors must be an array of strings."));
+    }
+  }
+
   if (
     config["prScope"] !== undefined &&
     config["prScope"] !== "phoebe" &&
     config["prScope"] !== "all"
   ) {
     throw new Error(describePath(path, `config.prScope must be "phoebe" or "all".`));
+  }
+  if (
+    config["prBaseScope"] !== undefined &&
+    config["prBaseScope"] !== "default" &&
+    config["prBaseScope"] !== "all"
+  ) {
+    throw new Error(describePath(path, `config.prBaseScope must be "default" or "all".`));
   }
   if (
     config["draftPrs"] !== undefined &&
