@@ -23,5 +23,5 @@ export function executionDecision(opts: {
 }
 
 export const EXECUTION_REFUSED_MESSAGE =
-  "[phoebe] Refusing to execute a work unit outside the Phoebe container. " +
+  "Refusing to execute a work unit outside the Phoebe container. " +
   "Use --dry-run to preview selection on the host, or start the container loop.";

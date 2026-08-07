@@ -63,6 +63,7 @@ import {
   executionDecision,
   isInsideContainer,
 } from "./execution-gate.ts";
+import { createPhoebeLog } from "./phoebe-log.ts";
 import {
   addWorktreeForExistingBranch,
   addWorktreeForNewBranch,
@@ -179,6 +180,11 @@ const inContainer = isInsideContainer();
 const repoDir = inContainer ? config.paths.repoDir : process.cwd();
 const worktreesDir = config.paths.worktreesDir;
 
+// One process per tenant (#62): every line this engine prints carries its
+// slug, so a host log collector multiplexing N repos onto one container's
+// stdout can attribute each line back to a repo.
+const { tag: PHOEBE_TAG, phoebeLog, phoebeError } = createPhoebeLog(config.repoSlug);
+
 // ---------------------------------------------------------------------------
 // Provider selection (multi-provider ready)
 // ---------------------------------------------------------------------------
@@ -243,8 +249,8 @@ function registerNativeStack(stackLinkArgs: string[]): void {
   try {
     gh(stackLinkArgs);
   } catch (error) {
-    console.warn(
-      `[phoebe] gh stack link failed — the PR bases off the blocker branch but is not ` +
+    phoebeError(
+      `gh stack link failed — the PR bases off the blocker branch but is not ` +
         `registered as a native stack. Register it manually with \`gh ${stackLinkArgs.join(" ")}\`. ` +
         `(${error instanceof Error ? error.message : String(error)})`,
     );
@@ -271,8 +277,8 @@ function prepareNativeStackTooling(): void {
       timeout: CHILD_PROCESS_TIMEOUT_MS,
     });
   } catch (error) {
-    console.warn(
-      `[phoebe] gh-stack extension not installed (already present, or offline at boot). ` +
+    phoebeError(
+      `gh-stack extension not installed (already present, or offline at boot). ` +
         `Native stacking needs it — install with \`gh ${ghStackExtensionInstallArgs().join(" ")}\`. ` +
         `(${error instanceof Error ? error.message : String(error)})`,
     );
@@ -296,7 +302,7 @@ function verifyIssueSourceAccess(): void {
     });
   } catch (error) {
     throw new Error(
-      `[phoebe] Cannot read issueSource repo "${config.issueSource.repoSlug}" with the ` +
+      `${PHOEBE_TAG} Cannot read issueSource repo "${config.issueSource.repoSlug}" with the ` +
         `configured GH_TOKEN. The work repo and issue source may need different token ` +
         `scopes — verify the token can read issues on the source repo. ` +
         `(${error instanceof Error ? error.message : String(error)})`,
@@ -365,9 +371,7 @@ function reclaimStaleClaims(runtimeId: string, opts: { forceOwnReclaim: boolean 
       forceOwnReclaim: opts.forceOwnReclaim,
     });
     if (reason === null) continue;
-    console.log(
-      `[phoebe] Reclaiming #${issue.number} (${reason}) back to ${config.issueSource.readyLabel}.`,
-    );
+    phoebeLog(`Reclaiming #${issue.number} (${reason}) back to ${config.issueSource.readyLabel}.`);
     gh(
       [
         "issue",
@@ -434,8 +438,8 @@ function fetchNativeBlockers(issueNumber: number): Array<{ number: number; state
     );
     return Array.isArray(rows) ? rows.map((row) => ({ number: row.number, state: row.state })) : [];
   } catch (error) {
-    console.warn(
-      `[phoebe] Native blocker lookup failed for #${issueNumber} — treating as no native blockers this cycle (${error instanceof Error ? error.message : String(error)}).`,
+    phoebeError(
+      `Native blocker lookup failed for #${issueNumber} — treating as no native blockers this cycle (${error instanceof Error ? error.message : String(error)}).`,
     );
     return [];
   }
@@ -480,8 +484,8 @@ function buildBlockerStates(
       states.set(n, blockerPrState(n));
     } catch (error) {
       // Absent entries are treated as unmerged blockers — safe to retry next cycle.
-      console.warn(
-        `[phoebe] Skipping blocker state for #${n} this cycle — ${error instanceof Error ? error.message : String(error)}`,
+      phoebeError(
+        `Skipping blocker state for #${n} this cycle — ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -678,8 +682,8 @@ function recordUnitTimeout(picked: WorkUnit, phoebeLogin: string, emit: EmitUnit
       });
     }
   } catch (error) {
-    console.error(
-      `[phoebe] Could not record timeout toward quarantine for ${ref.kind} #${ref.id} — ` +
+    phoebeError(
+      `Could not record timeout toward quarantine for ${ref.kind} #${ref.id} — ` +
         `${error instanceof Error ? error.message : String(error)}`,
     );
   }
@@ -903,8 +907,8 @@ function recordFailedAttempt(opts: {
 
   if (plan.quarantined) {
     gh(["pr", "edit", String(opts.prNumber), "--add-label", PHOEBE_QUARANTINE_LABEL]);
-    console.log(
-      `[phoebe] Quarantined ${opts.kind} unit for PR #${opts.prNumber} after ${plan.marker.n} attempts with no commit (${opts.signature}).`,
+    phoebeLog(
+      `Quarantined ${opts.kind} unit for PR #${opts.prNumber} after ${plan.marker.n} attempts with no commit (${opts.signature}).`,
     );
   }
 }
@@ -961,8 +965,8 @@ function recordFailedIssueAttempt(opts: {
 
   if (plan.quarantined) {
     gh(["issue", "edit", String(opts.issueNumber), "--add-label", PHOEBE_QUARANTINE_LABEL]);
-    console.log(
-      `[phoebe] Quarantined ${opts.kind} #${opts.issueNumber} after ${plan.marker.n} claims with no PR (${opts.signature}).`,
+    phoebeLog(
+      `Quarantined ${opts.kind} #${opts.issueNumber} after ${plan.marker.n} claims with no PR (${opts.signature}).`,
     );
   }
 }
@@ -1104,8 +1108,8 @@ function startLeaseHeartbeat(opts: {
         }),
       );
     } catch (error) {
-      console.warn(
-        `[phoebe] Lease heartbeat failed for #${opts.issueNumber} — ${
+      phoebeError(
+        `Lease heartbeat failed for #${opts.issueNumber} — ${
           error instanceof Error ? error.message : String(error)
         }.`,
       );
@@ -1152,7 +1156,7 @@ async function runAgentInWorktree(opts: {
       }),
   });
   if (exitCode !== 0) {
-    console.log(`[phoebe] Agent exited with code ${exitCode}.`);
+    phoebeLog(`Agent exited with code ${exitCode}.`);
   }
   return exitCode;
 }
@@ -1313,8 +1317,8 @@ async function runConflictResolutionAgent(
           mergeStateStatus: prInfo.mergeStateStatus,
         })
       ) {
-        console.log(
-          `[phoebe] Conflict fix for PR #${pr.prNumber} produced no commits — leaving PR unchanged.`,
+        phoebeLog(
+          `Conflict fix for PR #${pr.prNumber} produced no commits — leaving PR unchanged.`,
         );
         const watermark = currentConflictFailureWatermark(pr.headRefName, baseBranch);
         recordFailedAttempt({
@@ -1329,9 +1333,9 @@ async function runConflictResolutionAgent(
         });
       } else if (localCommitCount > 0) {
         pushBranch(worktreeDir, branch);
-        console.log(`[phoebe] Conflict resolved for PR #${pr.prNumber} — pushed.`);
+        phoebeLog(`Conflict resolved for PR #${pr.prNumber} — pushed.`);
       } else {
-        console.log(`[phoebe] Conflict resolved for PR #${pr.prNumber} — already pushed by agent.`);
+        phoebeLog(`Conflict resolved for PR #${pr.prNumber} — already pushed by agent.`);
       }
     },
   });
@@ -1367,23 +1371,23 @@ function retargetMergedStackedPrs(): void {
     try {
       blockerStates.set(blockerIssueNumber, blockerPrState(blockerIssueNumber));
     } catch (error) {
-      console.warn(
-        `[phoebe] Skipping stack-retarget check for blocker #${blockerIssueNumber} this cycle — ${error instanceof Error ? error.message : String(error)}`,
+      phoebeError(
+        `Skipping stack-retarget check for blocker #${blockerIssueNumber} this cycle — ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
 
   const candidates = openPrs.map((pr) => ({ prNumber: pr.number, baseRefName: pr.baseRefName }));
   for (const pr of selectStackRetargetCandidates(candidates, blockerStates)) {
-    console.log(
-      `[phoebe] Retargeting PR #${pr.prNumber} from ${pr.baseRefName} to ${config.defaultBranch} — blocker merged.`,
+    phoebeLog(
+      `Retargeting PR #${pr.prNumber} from ${pr.baseRefName} to ${config.defaultBranch} — blocker merged.`,
     );
     try {
       gh(["pr", "edit", String(pr.prNumber), "--base", config.defaultBranch]);
       postPrComment(pr.prNumber, stackRetargetedComment(config.defaultBranch));
     } catch (error) {
-      console.warn(
-        `[phoebe] Failed to retarget PR #${pr.prNumber} — ${error instanceof Error ? error.message : String(error)}`,
+      phoebeError(
+        `Failed to retarget PR #${pr.prNumber} — ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -1394,28 +1398,28 @@ async function fixOnePrConflict(
   ctx: StackContext,
 ): Promise<UnitResult> {
   const baseBranch = pr.baseRefName ?? defaultBranchRef;
-  console.log(`[phoebe] Conflict fix: PR #${pr.prNumber} (${pr.headRefName}).`);
+  phoebeLog(`Conflict fix: PR #${pr.prNumber} (${pr.headRefName}).`);
   fetchOrigin();
 
   const issueNumber = pr.issueNumber ?? parseIssueNumberFromBranch(pr.headRefName);
   const body = issueNumber !== null ? (ctx.issueBodies.get(issueNumber) ?? "") : "";
   const mergedBlockerPrNumbers = getMergedBlockerPrNumbers(body, ctx.blockerStates);
   if (mergedBlockerPrNumbers.length > 0) {
-    console.log(
-      `[phoebe] Stacked catch-up: merging blocker PR(s) ${mergedBlockerPrNumbers.map((n) => `#${n}`).join(", ")} before ${config.defaultBranch}.`,
+    phoebeLog(
+      `Stacked catch-up: merging blocker PR(s) ${mergedBlockerPrNumbers.map((n) => `#${n}`).join(", ")} before ${config.defaultBranch}.`,
     );
   }
 
   const cleanResult = tryCleanMerge(pr.headRefName, mergedBlockerPrNumbers, baseBranch);
   if (cleanResult === "pushed") {
-    console.log(`[phoebe] Clean merge for PR #${pr.prNumber} — pushed.`);
+    phoebeLog(`Clean merge for PR #${pr.prNumber} — pushed.`);
     if (mergedBlockerPrNumbers.length > 0) {
       postPrComment(pr.prNumber, stackedCatchUpRetractionComment(mergedBlockerPrNumbers));
     }
     return { exitCode: null };
   }
   if (cleanResult === "failed") {
-    console.log(`[phoebe] Could not start merge for PR #${pr.prNumber} — skipping.`);
+    phoebeLog(`Could not start merge for PR #${pr.prNumber} — skipping.`);
     const watermark = currentConflictFailureWatermark(pr.headRefName, baseBranch);
     recordFailedAttempt({
       kind: "conflict",
@@ -1447,9 +1451,7 @@ async function runChecksResolutionAgent(pr: ChecksCandidate): Promise<UnitResult
           originShaAfter,
         })
       ) {
-        console.log(
-          `[phoebe] Checks fix for PR #${pr.prNumber} produced no commits — leaving PR unchanged.`,
-        );
+        phoebeLog(`Checks fix for PR #${pr.prNumber} produced no commits — leaving PR unchanged.`);
         const watermark = currentChecksFailureWatermark(pr.headRefName);
         recordFailedAttempt({
           kind: "checks",
@@ -1460,9 +1462,9 @@ async function runChecksResolutionAgent(pr: ChecksCandidate): Promise<UnitResult
         });
       } else if (localCommitCount > 0) {
         pushBranch(worktreeDir, branch);
-        console.log(`[phoebe] Checks fixed for PR #${pr.prNumber} — pushed.`);
+        phoebeLog(`Checks fixed for PR #${pr.prNumber} — pushed.`);
       } else {
-        console.log(`[phoebe] Checks fixed for PR #${pr.prNumber} — already pushed by agent.`);
+        phoebeLog(`Checks fixed for PR #${pr.prNumber} — already pushed by agent.`);
       }
     },
   });
@@ -1470,8 +1472,8 @@ async function runChecksResolutionAgent(pr: ChecksCandidate): Promise<UnitResult
 
 async function fixOnePrChecks(pr: ChecksCandidate, ctx: StackContext): Promise<UnitResult> {
   const baseBranch = pr.baseRefName ?? defaultBranchRef;
-  console.log(
-    `[phoebe] Checks fix: PR #${pr.prNumber} (${pr.headRefName}) — ` +
+  phoebeLog(
+    `Checks fix: PR #${pr.prNumber} (${pr.headRefName}) — ` +
       `${pr.failingChecks.map((c) => c.name).join(", ")}.`,
   );
   fetchOrigin();
@@ -1481,27 +1483,23 @@ async function fixOnePrChecks(pr: ChecksCandidate, ctx: StackContext): Promise<U
     const body = issueNumber !== null ? (ctx.issueBodies.get(issueNumber) ?? "") : "";
     const mergedBlockerPrNumbers = getMergedBlockerPrNumbers(body, ctx.blockerStates);
     if (mergedBlockerPrNumbers.length > 0) {
-      console.log(
-        `[phoebe] Behind ${baseBranch} — catch-up merging blocker PR(s) ${mergedBlockerPrNumbers.map((n) => `#${n}`).join(", ")} before ${baseBranch}.`,
+      phoebeLog(
+        `Behind ${baseBranch} — catch-up merging blocker PR(s) ${mergedBlockerPrNumbers.map((n) => `#${n}`).join(", ")} before ${baseBranch}.`,
       );
     } else {
-      console.log(`[phoebe] Behind ${baseBranch} — catch-up merge for PR #${pr.prNumber}.`);
+      phoebeLog(`Behind ${baseBranch} — catch-up merge for PR #${pr.prNumber}.`);
     }
 
     const cleanResult = tryCleanMerge(pr.headRefName, mergedBlockerPrNumbers, baseBranch);
     if (cleanResult === "pushed") {
-      console.log(
-        `[phoebe] Catch-up merge for PR #${pr.prNumber} — pushed; waiting for CI on next cycle.`,
-      );
+      phoebeLog(`Catch-up merge for PR #${pr.prNumber} — pushed; waiting for CI on next cycle.`);
       if (mergedBlockerPrNumbers.length > 0) {
         postPrComment(pr.prNumber, stackedCatchUpRetractionComment(mergedBlockerPrNumbers));
       }
       return { exitCode: null };
     }
     if (cleanResult === "conflicted" || cleanResult === "failed") {
-      console.log(
-        `[phoebe] Catch-up merge conflicted for PR #${pr.prNumber} — deferring to conflicts mode.`,
-      );
+      phoebeLog(`Catch-up merge conflicted for PR #${pr.prNumber} — deferring to conflicts mode.`);
       return { exitCode: null };
     }
   }
@@ -1629,11 +1627,9 @@ async function runReviewsResolutionAgent(
     onResult: ({ worktreeDir, branch, originShaBefore, originShaAfter, localCommitCount }) => {
       if (localCommitCount > 0) {
         pushBranch(worktreeDir, branch);
-        console.log(`[phoebe] Review feedback handled for PR #${pr.prNumber} — pushed.`);
+        phoebeLog(`Review feedback handled for PR #${pr.prNumber} — pushed.`);
       } else if (originShaAfter !== originShaBefore) {
-        console.log(
-          `[phoebe] Review feedback handled for PR #${pr.prNumber} — already pushed by agent.`,
-        );
+        phoebeLog(`Review feedback handled for PR #${pr.prNumber} — already pushed by agent.`);
       }
 
       const hasSummary = hasNewReviewSummaryComment(pr.prNumber, phoebeLogin, runStartedAt);
@@ -1646,9 +1642,9 @@ async function runReviewsResolutionAgent(
       const latestActivityAt = newestReviewThreadCommentCreatedAt(pr.threads);
 
       if (hasSummary) {
-        console.log(`[phoebe] Review summary posted for PR #${pr.prNumber}.`);
+        phoebeLog(`Review summary posted for PR #${pr.prNumber}.`);
       } else if (!pushed) {
-        console.log(`[phoebe] Review handling for PR #${pr.prNumber} produced no summary or push.`);
+        phoebeLog(`Review handling for PR #${pr.prNumber} produced no summary or push.`);
       }
 
       postPrComment(
@@ -1663,7 +1659,7 @@ async function runReviewsResolutionAgent(
 }
 
 async function fixOnePrReviews(pr: ReviewsCandidate, phoebeLogin: string): Promise<UnitResult> {
-  console.log(`[phoebe] Reviews fix: PR #${pr.prNumber} (${pr.headRefName}).`);
+  phoebeLog(`Reviews fix: PR #${pr.prNumber} (${pr.headRefName}).`);
   fetchOrigin();
   return runReviewsResolutionAgent(pr, phoebeLogin);
 }
@@ -1775,9 +1771,7 @@ async function runOneIssue(opts: {
           registerNativeStack(plan.stackLinkArgs);
         }
       } else {
-        console.log(
-          `[phoebe] PR #${existingPr} already exists for ${agentBranch} — posting follow-up note.`,
-        );
+        phoebeLog(`PR #${existingPr} already exists for ${agentBranch} — posting follow-up note.`);
         postPrComment(
           existingPr,
           followUpPrComment(
@@ -1789,7 +1783,7 @@ async function runOneIssue(opts: {
         );
       }
     } else {
-      console.log("[phoebe] No commits — skipping PR creation.");
+      phoebeLog("No commits — skipping PR creation.");
     }
 
     // #22: count claim→release cycles that end with no PR for this issue, and
@@ -1905,8 +1899,8 @@ async function fetchConflictingPrs(): Promise<ConflictingPrCandidate[]> {
         conflicting.push(candidate);
       }
     } catch (error) {
-      console.warn(
-        `[phoebe] Skipping PR #${pr.number} for conflicts this cycle — ${error instanceof Error ? error.message : String(error)}`,
+      phoebeError(
+        `Skipping PR #${pr.number} for conflicts this cycle — ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -1971,8 +1965,8 @@ async function fetchFailingCheckPrs(): Promise<ChecksCandidate[]> {
         failing.push(candidate);
       }
     } catch (error) {
-      console.warn(
-        `[phoebe] Skipping PR #${pr.number} for checks this cycle — ${error instanceof Error ? error.message : String(error)}`,
+      phoebeError(
+        `Skipping PR #${pr.number} for checks this cycle — ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -2029,8 +2023,8 @@ async function fetchReviewsWorkData(): Promise<{
         ...(issueNumber !== null ? { issueNumber } : {}),
       });
     } catch (error) {
-      console.warn(
-        `[phoebe] Skipping PR #${pr.number} for reviews this cycle — ${error instanceof Error ? error.message : String(error)}`,
+      phoebeError(
+        `Skipping PR #${pr.number} for reviews this cycle — ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -2119,8 +2113,8 @@ function fetchResearchWorkData(): {
 async function runIssueUnit(unit: IssueWorkUnit, context: RunContext): Promise<UnitResult> {
   const { issue: target, resolution } = unit;
   const { runtimeId } = context;
-  console.log(
-    `[phoebe] Working #${target.number} — base ${resolution.worktreeBase}` +
+  phoebeLog(
+    `Working #${target.number} — base ${resolution.worktreeBase}` +
       (resolution.stacked ? ` (stacked on #${resolution.blockerIssueNumber})` : "") +
       ".",
   );
@@ -2158,8 +2152,8 @@ async function runIssueUnit(unit: IssueWorkUnit, context: RunContext): Promise<U
 
 async function runResearchUnit(unit: IssueWorkUnit, context: RunContext): Promise<UnitResult> {
   const { issue: target, resolution } = unit;
-  console.log(
-    `[phoebe] Researching #${target.number} — base ${resolution.worktreeBase}` +
+  phoebeLog(
+    `Researching #${target.number} — base ${resolution.worktreeBase}` +
       (resolution.stacked ? ` (stacked on #${resolution.blockerIssueNumber})` : "") +
       ".",
   );
@@ -2320,7 +2314,7 @@ function logIdleCycle(data: CycleWorkData): string {
     !selectIssue(data.issues, data.blockerStates, phoebeBase, data.nativeBlockersByIssue)
   ) {
     const reason = `${data.issues.length} ${config.issueSource.readyLabel} issue(s) but none workable this cycle (blocked or waiting on blocker PR).`;
-    console.log(`[phoebe] ${reason}`);
+    phoebeLog(reason);
     return reason;
   }
   if (
@@ -2328,7 +2322,7 @@ function logIdleCycle(data: CycleWorkData): string {
     !selectIssue(data.researchIssues, data.blockerStates, phoebeBase, data.nativeBlockersByIssue)
   ) {
     const reason = `${data.researchIssues.length} ${config.researchLabel} ticket(s) but none workable this cycle (blocked or waiting on blocker PR).`;
-    console.log(`[phoebe] ${reason}`);
+    phoebeLog(reason);
     return reason;
   }
   const stack: StackContext = { issueBodies: data.issueBodies, blockerStates: data.blockerStates };
@@ -2342,31 +2336,25 @@ function logIdleCycle(data: CycleWorkData): string {
       conflictOpts,
     );
     if (skippedStacked > 0) {
-      console.log(
-        `[phoebe] ${skippedStacked} conflicting PR(s) skipped (stacked on open blocker).`,
-      );
+      phoebeLog(`${skippedStacked} conflicting PR(s) skipped (stacked on open blocker).`);
     }
     if (skippedWatermark > 0) {
-      console.log(
-        `[phoebe] ${skippedWatermark} conflicting PR(s) skipped (unchanged failure watermark).`,
-      );
+      phoebeLog(`${skippedWatermark} conflicting PR(s) skipped (unchanged failure watermark).`);
     }
     if (!unit) {
       const reason = `${data.conflictingPrs.length} conflicting PR(s) but none fixable this cycle.`;
-      console.log(`[phoebe] ${reason}`);
+      phoebeLog(reason);
       return reason;
     }
   }
   if (data.failingCheckPrs.length > 0) {
     const { unit, skipped } = summarizeChecksSelection(data.failingCheckPrs, stack);
     if (skipped > 0) {
-      console.log(
-        `[phoebe] ${skipped} failing-CI PR(s) skipped (conflicting, stacked, or watermarked).`,
-      );
+      phoebeLog(`${skipped} failing-CI PR(s) skipped (conflicting, stacked, or watermarked).`);
     }
     if (!unit) {
       const reason = `${data.failingCheckPrs.length} failing-CI PR(s) but none fixable this cycle.`;
-      console.log(`[phoebe] ${reason}`);
+      phoebeLog(reason);
       return reason;
     }
   }
@@ -2377,18 +2365,18 @@ function logIdleCycle(data: CycleWorkData): string {
       data.phoebeLogin,
     );
     if (skipped > 0) {
-      console.log(
-        `[phoebe] ${skipped} review-feedback PR(s) skipped (stacked, watermarked, or no new activity).`,
+      phoebeLog(
+        `${skipped} review-feedback PR(s) skipped (stacked, watermarked, or no new activity).`,
       );
     }
     if (!unit) {
       const reason = `${data.reviewActivityPrs.length} review-feedback PR(s) but none fixable this cycle.`;
-      console.log(`[phoebe] ${reason}`);
+      phoebeLog(reason);
       return reason;
     }
   }
   const reason = "No work this cycle — idle.";
-  console.log(`[phoebe] ${reason}`);
+  phoebeLog(reason);
   return reason;
 }
 
@@ -2463,8 +2451,8 @@ function pullRequestNumberAfterWork(picked: WorkUnit): number | undefined {
     ]);
     return rows[0] ? asPrNumber(rows[0].number) : undefined;
   } catch (error) {
-    console.warn(
-      `[phoebe] Could not resolve the PR link for ${branch} — ${
+    phoebeError(
+      `Could not resolve the PR link for ${branch} — ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
@@ -2507,20 +2495,20 @@ export async function runEngine(argv: readonly string[] = process.argv.slice(2))
       ...Object.values(config.providerEnv).map((name) => process.env[name] ?? ""),
     ],
     onWriteError: (error) =>
-      console.warn(
-        `[phoebe] Runtime telemetry write failed — ${
+      phoebeError(
+        `Runtime telemetry write failed — ${
           error instanceof Error ? error.message : String(error)
         }. Work will continue.`,
       ),
   });
 
-  console.log(
+  phoebeLog(
     runOnce
-      ? "[phoebe] Run-once mode — will work at most one unit of the first one-shot-eligible kind in WORK_ORDER, then exit."
-      : `[phoebe] Persistent mode — idle poll every ${pollIntervalMs}ms. SIGTERM drains: finish the current unit, then exit 0.`,
+      ? "Run-once mode — will work at most one unit of the first one-shot-eligible kind in WORK_ORDER, then exit."
+      : `Persistent mode — idle poll every ${pollIntervalMs}ms. SIGTERM drains: finish the current unit, then exit 0.`,
   );
   if (dryRun) {
-    console.log("[phoebe] Dry-run — selection only, nothing executes.");
+    phoebeLog("Dry-run — selection only, nothing executes.");
   }
 
   // Bootstrap the private clone every work unit fetches/worktrees against. Only
@@ -2617,7 +2605,7 @@ async function runLoop({
 }): Promise<void> {
   while (true) {
     if (drain.requested) {
-      console.log("[phoebe] Drain requested — starting no new work unit; exiting 0.");
+      phoebeLog("Drain requested — starting no new work unit; exiting 0.");
       status.record({
         kind: "draining",
         reason: drainReason(drain, "starting no new work unit."),
@@ -2670,7 +2658,7 @@ async function runLoop({
 
     if (!picked) {
       if (runOnce) {
-        console.log(RUN_ONCE_NOTHING_MESSAGE);
+        phoebeLog(RUN_ONCE_NOTHING_MESSAGE);
         status.record({ kind: "idle", reason: RUN_ONCE_NOTHING_MESSAGE });
       } else {
         status.record({ kind: "idle", reason: logIdleCycle(data) });
@@ -2686,7 +2674,7 @@ async function runLoop({
     // freshly-picked unit start — "start no new one". The in-flight unit (if any)
     // already finished before we looped back here, so exit now.
     if (drain.requested) {
-      console.log("[phoebe] Drain requested before starting the next unit — exiting 0.");
+      phoebeLog("Drain requested before starting the next unit — exiting 0.");
       status.record({
         kind: "draining",
         reason: drainReason(drain, "starting no new work unit."),
@@ -2697,12 +2685,12 @@ async function runLoop({
     const decision = executionDecision({ dryRun, inContainer });
     if (decision === "dry-run") {
       const reason = `Would execute: ${describeUnit(picked)}.`;
-      console.log(`[phoebe] ${reason}`);
+      phoebeLog(reason);
       status.record({ kind: "idle", reason });
       break;
     }
     if (decision === "refuse") {
-      console.error(EXECUTION_REFUSED_MESSAGE);
+      phoebeError(EXECUTION_REFUSED_MESSAGE);
       status.record({ kind: "engine-failed", error: EXECUTION_REFUSED_MESSAGE });
       process.exit(1);
     }
@@ -2720,7 +2708,7 @@ async function runLoop({
           // The supervisor's channel closed while we waited for a slot. Stop
           // rather than run unbrokered (which, across a fleet, would bypass the
           // global cap); the supervisor is gone or will respawn us afresh.
-          console.error(`[phoebe] ${error.message} — stopping this engine.`);
+          phoebeError(`${error.message} — stopping this engine.`);
           break;
         }
         throw error;
@@ -2797,8 +2785,8 @@ async function runLoop({
       }
       // A failed unit must not kill the daemon — prepareWorktree clears any
       // stale worktree on the next attempt.
-      console.error(
-        `[phoebe] Failed executing ${describeUnit(picked)} — ${error instanceof Error ? error.message : String(error)}`,
+      phoebeError(
+        `Failed executing ${describeUnit(picked)} — ${error instanceof Error ? error.message : String(error)}`,
       );
       await drain.wait(pollIntervalMs);
       continue;
@@ -2810,7 +2798,7 @@ async function runLoop({
     // Drain requested while the unit ran: it is finished, so exit now rather
     // than picking up another. This is the graceful-drain boundary.
     if (drain.requested) {
-      console.log("[phoebe] Finished the in-flight unit under drain — exiting 0.");
+      phoebeLog("Finished the in-flight unit under drain — exiting 0.");
       status.record({
         kind: "draining",
         reason: drainReason(drain, "the in-flight unit finished."),

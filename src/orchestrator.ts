@@ -980,7 +980,7 @@ export const WORK_KIND_ONE_SHOT_ELIGIBLE: Record<WorkKindName, boolean> = {
 };
 
 export const RUN_ONCE_NOTHING_MESSAGE =
-  "[phoebe] Nothing to do under --run-once (janitor kinds are persistent-mode only).";
+  "Nothing to do under --run-once (janitor kinds are persistent-mode only).";
 
 export function oneShotWorkKinds(workOrder: readonly WorkKindName[]): readonly WorkKindName[] {
   return workOrder.filter((kind) => WORK_KIND_ONE_SHOT_ELIGIBLE[kind]);
