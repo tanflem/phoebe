@@ -2,380 +2,518 @@
 // over and over, `phoebe boot` stops chasing the tracked ref and pins back to
 // the last SHA that ran healthily.
 //
-// Everything here is the *policy* — a fold over finished runs plus the choice of
-// which commit to run next — kept pure so the whole ladder (first crash, third
-// crash, fallback, recovery when the branch moves on) is asserted without
-// spawning an engine or waiting out a healthy window. The persistence half is
-// tested against a real temp dir, because "survives a container restart" is a
-// claim about a file.
+// The module's only exports are `createCrashGuard` and the `CrashGuard` type
+// (#77) — the fold, the persisted record, and the wording an operator sees are
+// all internal. So every case here drives the guard: a fake in-memory store
+// keeps most of them fast and off the filesystem, and the guard's logged lines
+// stand in for the old exported event stream — the tests capture lines and
+// assert what an operator actually sees, same as boot.ts would. A handful of
+// cases (storage) still use a real temp dir, because "survives a container
+// restart" is a claim about a file.
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vite-plus/test";
-import {
-  CRASH_LOOP_THRESHOLD,
-  ENGINE_STATE_DIR,
-  HEALTHY_RUN_MS,
-  INITIAL_CRASH_LOOP_STATE,
-  crashLoopStatePath,
-  createCrashGuard,
-  fallbackSha,
-  hasFallbackTarget,
-  judgeRun,
-  readCrashLoopState,
-  recordRun,
-  writeCrashLoopState,
-  type CrashGuardEvent,
-  type CrashLoopState,
-} from "./crash-loop.ts";
+import { createCrashGuard, type CrashGuard } from "./crash-loop.ts";
+import type { EngineRun, LaunchedEngine } from "./reconcile.ts";
+
+/** The store shape `createCrashGuard` accepts — not exported, so derived structurally. */
+type CrashLoopStore = NonNullable<Parameters<typeof createCrashGuard>[0]["store"]>;
 
 const BAD = "b".repeat(40);
 const GOOD = "9".repeat(40);
 const NEXT = "e".repeat(40);
+const OTHER = "c".repeat(40);
+
+// Mirrors the module's real defaults (bootstrap/crash-loop.ts) — not imported,
+// since creating a guard no longer exposes them. Kept small here so the ladder
+// tests run without waiting out a real 60s healthy window.
+const THRESHOLD = 3;
+const HEALTHY_MS = 1_000;
+
+function launchedEngine(sha: string | null, guarded: boolean): LaunchedEngine {
+  return {
+    entry: "engine-entry",
+    sha,
+    config: null,
+    sample: () => {
+      throw new Error("not used in crash-guard tests");
+    },
+    quarantinedSha: null,
+    guarded,
+  };
+}
 
 /** A run that died on startup — the shape the fallback exists to catch. */
-function crash(sha: string) {
-  return { sha, exitCode: 1, elapsedMs: 400, requestedStop: false };
+function crashRun(sha: string, opts: { guarded?: boolean } = {}): EngineRun {
+  return {
+    engine: launchedEngine(sha, opts.guarded ?? true),
+    exit: { code: 1, signal: null },
+    elapsedMs: 400,
+    requestedStop: false,
+  };
 }
 
 /** A run that lived past the healthy window. */
-function healthy(sha: string) {
-  return { sha, exitCode: 0, elapsedMs: HEALTHY_RUN_MS * 2, requestedStop: false };
+function healthyRun(sha: string, opts: { guarded?: boolean } = {}): EngineRun {
+  return {
+    engine: launchedEngine(sha, opts.guarded ?? true),
+    exit: { code: 0, signal: null },
+    elapsedMs: HEALTHY_MS * 2,
+    requestedStop: false,
+  };
 }
 
-describe("judgeRun", () => {
+/** A fake store good enough for a whole test — no filesystem involved. */
+function fakeStore(): CrashLoopStore {
+  let state: ReturnType<CrashLoopStore["read"]> = {
+    lastGoodSha: null,
+    failingSha: null,
+    failureCount: 0,
+  };
+  return {
+    read: () => state,
+    write: (next) => {
+      state = next;
+    },
+  };
+}
+
+/** A guard over a fresh fake store, capturing every logged line. */
+function guard(opts: { store?: CrashLoopStore; threshold?: number; healthyMs?: number } = {}) {
+  const lines: string[] = [];
+  const g = createCrashGuard({
+    engineDir: "/unused",
+    log: (line) => lines.push(line),
+    store: opts.store ?? fakeStore(),
+    threshold: opts.threshold ?? THRESHOLD,
+    healthyMs: opts.healthyMs ?? HEALTHY_MS,
+  });
+  return { g, lines };
+}
+
+/** Classify a logged line by which guard decision produced it, for readable assertions. */
+function kindOf(line: string): string {
+  if (line.includes("fast crash")) return "crash";
+  if (line.includes("recorded as the crash-loop fallback target")) return "last-good";
+  if (line.includes("falling back to last-good")) return "fallback";
+  if (line.includes("crashed too")) return "fallback-crashed";
+  if (line.includes("fallback lifted")) return "recovered";
+  if (line.includes("could not write crash-loop state")) return "persist-failed";
+  return `unrecognized: ${line}`;
+}
+
+describe("judging a finished run", () => {
   test("surviving the healthy window proves the commit, however the run then ended", () => {
-    // The code booted and worked; whatever ended it an hour in is not a bad
-    // deployment, and pinning to older code would not help.
-    expect(
-      judgeRun({ sha: GOOD, exitCode: 1, elapsedMs: HEALTHY_RUN_MS, requestedStop: true }),
-    ).toBe("healthy");
+    // The code booted and worked; whatever ended it inside the window is not a
+    // bad deployment, and pinning to older code would not help.
+    const { g, lines } = guard();
+    g.record({
+      engine: launchedEngine(GOOD, true),
+      exit: { code: 1, signal: null },
+      elapsedMs: HEALTHY_MS,
+      requestedStop: true,
+    });
+    expect(lines.map(kindOf)).toEqual(["last-good"]);
   });
 
   test("exiting 0 unprompted proves it too — it finished what it was asked to do", () => {
-    expect(judgeRun({ sha: GOOD, exitCode: 0, elapsedMs: 5, requestedStop: false })).toBe(
-      "healthy",
-    );
+    const { g, lines } = guard();
+    g.record({
+      engine: launchedEngine(GOOD, true),
+      exit: { code: 0, signal: null },
+      elapsedMs: 5,
+      requestedStop: false,
+    });
+    expect(lines.map(kindOf)).toEqual(["last-good"]);
   });
 
   test("a fast non-zero exit is a crash", () => {
-    expect(judgeRun(crash(BAD))).toBe("crash");
+    const { g, lines } = guard();
+    g.record(crashRun(BAD));
+    expect(lines.map(kindOf)).toEqual(["crash"]);
   });
 
   test("a run boot cut short proves nothing either way", () => {
     // This is the dangerous case: a container stop landing seconds into a
     // relaunch of a crash-looping commit. Crediting that exit as healthy would
     // promote the bad commit to last-good and disarm the fallback for good.
-    expect(judgeRun({ sha: BAD, exitCode: 0, elapsedMs: 5, requestedStop: true })).toBe(
-      "inconclusive",
-    );
+    const { g, lines } = guard();
+    g.record({
+      engine: launchedEngine(BAD, true),
+      exit: { code: 0, signal: null },
+      elapsedMs: 5,
+      requestedStop: true,
+    });
+    expect(lines).toEqual([]);
   });
 
   test("a signal death says nothing about the code", () => {
     // Something outside killed the process — an OOM reaper, a `docker kill`.
-    expect(judgeRun({ sha: BAD, exitCode: null, elapsedMs: 5, requestedStop: false })).toBe(
-      "inconclusive",
-    );
+    const { g, lines } = guard();
+    g.record({
+      engine: launchedEngine(BAD, true),
+      exit: { code: null, signal: "SIGKILL" },
+      elapsedMs: 5,
+      requestedStop: false,
+    });
+    expect(lines).toEqual([]);
   });
 });
 
-describe("recordRun", () => {
+describe("folding a run into the record", () => {
+  const crashToThreshold = (g: CrashGuard, sha: string, times = THRESHOLD) => {
+    for (let i = 0; i < times; i++) g.record(crashRun(sha));
+  };
+
   test("a healthy run becomes the fallback target", () => {
-    expect(recordRun(INITIAL_CRASH_LOOP_STATE, healthy(GOOD))).toEqual({
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    crashToThreshold(g, BAD);
+    expect(g.fallbackFor(BAD)).toBe(GOOD);
+  });
+
+  test("a fast crash opens a count against its own sha", () => {
+    const { g, lines } = guard();
+    g.record(healthyRun(GOOD));
+    g.record(crashRun(BAD));
+    expect(lines.at(-1)).toContain(`fast crash 1/${THRESHOLD}`);
+  });
+
+  test("consecutive crashes of the same sha accumulate toward the threshold", () => {
+    const { g, lines } = guard();
+    crashToThreshold(g, BAD);
+    expect(lines).toEqual([
+      expect.stringContaining(`fast crash 1/${THRESHOLD}`),
+      expect.stringContaining(`fast crash 2/${THRESHOLD}`),
+      expect.stringContaining(`fast crash 3/${THRESHOLD}`),
+    ]);
+  });
+
+  test("a crash of a different sha starts its own count", () => {
+    // The branch moved while the old commit was failing; the new commit gets a
+    // clean slate rather than inheriting a verdict it did not earn.
+    const { g, lines } = guard();
+    g.record(healthyRun(GOOD));
+    g.record(crashRun(BAD));
+    g.record(crashRun(BAD));
+    lines.length = 0;
+    g.record(crashRun(NEXT));
+    expect(lines.at(-1)).toContain(`engine ${NEXT}`);
+    expect(lines.at(-1)).toContain(`fast crash 1/${THRESHOLD}`);
+  });
+
+  test("a healthy fallback run keeps the crash-looping sha quarantined", () => {
+    // The engine is running GOOD *because* BAD is quarantined. Letting a healthy
+    // fallback run clear the record would send boot straight back into BAD.
+    const { g, lines } = guard();
+    g.record(healthyRun(GOOD));
+    crashToThreshold(g, BAD);
+    expect(g.fallbackFor(BAD)).toBe(GOOD);
+
+    lines.length = 0;
+    g.record(healthyRun(GOOD));
+    expect(lines).toEqual([]); // lastGoodSha did not change — nothing to announce
+    expect(g.fallbackFor(BAD)).toBe(GOOD);
+  });
+
+  test("a healthy run of the failing sha itself lifts the quarantine", () => {
+    // Whatever was wrong was transient, not the commit — stop avoiding it.
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    g.record(crashRun(BAD));
+    g.record(crashRun(BAD));
+    g.record(healthyRun(BAD));
+    expect(g.fallbackFor(BAD)).toBeNull();
+  });
+
+  test("an inconclusive run leaves the record exactly as it was", () => {
+    // A container stop landing during a crash-loop must not credit the crashing
+    // commit — that would disarm the fallback permanently.
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    g.record(crashRun(BAD));
+    g.record(crashRun(BAD));
+    g.record({
+      engine: launchedEngine(BAD, true),
+      exit: { code: 0, signal: null },
+      elapsedMs: 5,
+      requestedStop: true,
+    });
+    // One more real crash reaches the threshold, proving the inconclusive run
+    // above neither advanced nor reset the count.
+    g.record(crashRun(BAD));
+    expect(g.fallbackFor(BAD)).toBe(GOOD);
+  });
+
+  test("the fallback crashing too does not release the quarantine", () => {
+    // Boot is running GOOD *because* BAD is quarantined. If GOOD dies as well,
+    // the honest answer is "out of options" — not "BAD is fine again".
+    const { g, lines } = guard();
+    g.record(healthyRun(GOOD));
+    crashToThreshold(g, BAD);
+    lines.length = 0;
+    g.record(crashRun(GOOD));
+    expect(lines.map(kindOf)).toEqual(["fallback-crashed"]);
+    expect(g.fallbackFor(BAD)).toBe(GOOD);
+  });
+});
+
+describe("choosing what to run instead of a crash-looping tip", () => {
+  test("below the threshold the target still gets to run", () => {
+    // A single startup crash may be a flaky network or a busy host; give the
+    // configured ref its full allowance before pinning away from it.
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    g.record(crashRun(BAD));
+    g.record(crashRun(BAD));
+    expect(g.fallbackFor(BAD)).toBeNull();
+  });
+
+  test("at the threshold the last-good sha takes over", () => {
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    for (let i = 0; i < THRESHOLD; i++) g.record(crashRun(BAD));
+    expect(g.fallbackFor(BAD)).toBe(GOOD);
+  });
+
+  test("with nothing known-good there is nowhere to fall back to", () => {
+    // First boot of a fresh volume: the very first ref crash-loops and no
+    // earlier commit was ever proven. Boot must fail loudly, not invent a pin.
+    const { g } = guard();
+    for (let i = 0; i < THRESHOLD + 6; i++) g.record(crashRun(BAD));
+    expect(g.fallbackFor(BAD)).toBeNull();
+  });
+
+  test("falling back to the crashing sha itself would change nothing", () => {
+    const { g } = guard();
+    g.record(healthyRun(BAD));
+    for (let i = 0; i < THRESHOLD + 6; i++) g.record(crashRun(BAD));
+    expect(g.fallbackFor(BAD)).toBeNull();
+  });
+
+  test("a quarantine on some other sha does not divert this one", () => {
+    // The branch advanced past the bad commit — reconcile resumes normally.
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    for (let i = 0; i < THRESHOLD + 6; i++) g.record(crashRun(BAD));
+    expect(g.fallbackFor(NEXT)).toBeNull();
+  });
+});
+
+describe("is relaunching worth it", () => {
+  test("a different known-good sha is worth relaunching for", () => {
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    expect(g.shouldRetry(crashRun(BAD))).toBe(true);
+  });
+
+  test("nothing known-good means retrying is pointless", () => {
+    const { g } = guard();
+    expect(g.shouldRetry(crashRun(BAD))).toBe(false);
+  });
+
+  test("the known-good sha crashing is the end of the road", () => {
+    // The fallback itself died fast; boot has run out of better ideas and lets
+    // the container exit rather than looping on the same commit forever.
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    expect(g.shouldRetry(crashRun(GOOD))).toBe(false);
+  });
+});
+
+describe("the ladder, end to end", () => {
+  test("three fast crashes pin to last-good, and the branch moving on releases it", () => {
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+
+    for (let i = 1; i <= THRESHOLD; i++) {
+      expect(g.fallbackFor(BAD)).toBeNull();
+      g.record(crashRun(BAD));
+    }
+
+    // Threshold reached: boot runs GOOD instead of the tracked ref's tip.
+    expect(g.fallbackFor(BAD)).toBe(GOOD);
+    g.record(healthyRun(GOOD));
+    expect(g.fallbackFor(BAD)).toBe(GOOD);
+
+    // A fix lands and the branch advances: the new tip is not quarantined, so
+    // the fallback lapses and the new commit runs.
+    expect(g.fallbackFor(NEXT)).toBeNull();
+    g.record(healthyRun(NEXT));
+
+    // NEXT is last-good now: a fresh bad commit's fallback target is NEXT, not
+    // the now-stale GOOD.
+    for (let i = 0; i < THRESHOLD; i++) g.record(crashRun(OTHER));
+    expect(g.fallbackFor(OTHER)).toBe(NEXT);
+  });
+});
+
+describe("where the record lives", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "crash-guard-test-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const realGuard = (engineDir: string) =>
+    createCrashGuard({ engineDir, log: () => {}, threshold: THRESHOLD, healthyMs: HEALTHY_MS });
+
+  test("the record lives at <engineDir>/engine-crash-loop.json", () => {
+    realGuard(dir).record(healthyRun(GOOD));
+    expect(JSON.parse(readFileSync(join(dir, "engine-crash-loop.json"), "utf8"))).toEqual({
       lastGoodSha: GOOD,
       failingSha: null,
       failureCount: 0,
     });
   });
 
-  test("a fast crash opens a count against its own sha", () => {
-    expect(recordRun({ lastGoodSha: GOOD, failingSha: null, failureCount: 0 }, crash(BAD))).toEqual(
-      {
-        lastGoodSha: GOOD,
-        failingSha: BAD,
-        failureCount: 1,
-      },
-    );
+  test("an explicit engine dir is honored, not a hardcoded default", () => {
+    const dirA = join(dir, "a");
+    const dirB = join(dir, "b");
+    realGuard(dirA).record(healthyRun(GOOD));
+    expect(existsSync(join(dirA, "engine-crash-loop.json"))).toBe(true);
+    expect(existsSync(join(dirB, "engine-crash-loop.json"))).toBe(false);
   });
 
-  test("consecutive crashes of the same sha accumulate toward the threshold", () => {
-    let state: CrashLoopState = { lastGoodSha: GOOD, failingSha: null, failureCount: 0 };
-    for (let i = 0; i < 3; i++) state = recordRun(state, crash(BAD));
-    expect(state).toEqual({ lastGoodSha: GOOD, failingSha: BAD, failureCount: 3 });
-  });
-
-  test("a crash of a different sha starts its own count", () => {
-    // The branch moved while the old commit was failing; the new commit gets a
-    // clean slate rather than inheriting a verdict it did not earn.
-    expect(recordRun({ lastGoodSha: GOOD, failingSha: BAD, failureCount: 2 }, crash(NEXT))).toEqual(
-      { lastGoodSha: GOOD, failingSha: NEXT, failureCount: 1 },
-    );
-  });
-
-  test("a healthy fallback run keeps the crash-looping sha quarantined", () => {
-    // The engine is running GOOD *because* BAD is quarantined. Letting a healthy
-    // fallback run clear the record would send boot straight back into BAD.
-    expect(
-      recordRun({ lastGoodSha: GOOD, failingSha: BAD, failureCount: 3 }, healthy(GOOD)),
-    ).toEqual({ lastGoodSha: GOOD, failingSha: BAD, failureCount: 3 });
-  });
-
-  test("a healthy run of the failing sha itself lifts the quarantine", () => {
-    // Whatever was wrong was transient, not the commit — stop avoiding it.
-    expect(
-      recordRun({ lastGoodSha: GOOD, failingSha: BAD, failureCount: 2 }, healthy(BAD)),
-    ).toEqual({ lastGoodSha: BAD, failingSha: null, failureCount: 0 });
-  });
-
-  test("an inconclusive run leaves the record exactly as it was", () => {
-    // A container stop landing during a crash-loop must not credit the crashing
-    // commit — that would disarm the fallback permanently.
-    const state: CrashLoopState = { lastGoodSha: GOOD, failingSha: BAD, failureCount: 2 };
-    expect(recordRun(state, { sha: BAD, exitCode: 0, elapsedMs: 5, requestedStop: true })).toEqual(
-      state,
-    );
-  });
-
-  test("the fallback crashing too does not release the quarantine", () => {
-    // Boot is running GOOD *because* BAD is quarantined. If GOOD dies as well,
-    // the honest answer is "out of options" — not "BAD is fine again".
-    const state: CrashLoopState = {
-      lastGoodSha: GOOD,
-      failingSha: BAD,
-      failureCount: CRASH_LOOP_THRESHOLD,
-    };
-    expect(recordRun(state, crash(GOOD))).toEqual(state);
-  });
-});
-
-describe("fallbackSha", () => {
-  test("below the threshold the target still gets to run", () => {
-    // A single startup crash may be a flaky network or a busy host; give the
-    // configured ref its full allowance before pinning away from it.
-    expect(fallbackSha(BAD, { lastGoodSha: GOOD, failingSha: BAD, failureCount: 2 })).toBeNull();
-  });
-
-  test("at the threshold the last-good sha takes over", () => {
-    expect(
-      fallbackSha(BAD, { lastGoodSha: GOOD, failingSha: BAD, failureCount: CRASH_LOOP_THRESHOLD }),
-    ).toBe(GOOD);
-  });
-
-  test("with nothing known-good there is nowhere to fall back to", () => {
-    // First boot of a fresh volume: the very first ref crash-loops and no
-    // earlier commit was ever proven. Boot must fail loudly, not invent a pin.
-    expect(fallbackSha(BAD, { lastGoodSha: null, failingSha: BAD, failureCount: 9 })).toBeNull();
-  });
-
-  test("falling back to the crashing sha itself would change nothing", () => {
-    expect(fallbackSha(BAD, { lastGoodSha: BAD, failingSha: BAD, failureCount: 9 })).toBeNull();
-  });
-
-  test("a quarantine on some other sha does not divert this one", () => {
-    // The branch advanced past the bad commit — reconcile resumes normally.
-    expect(fallbackSha(NEXT, { lastGoodSha: GOOD, failingSha: BAD, failureCount: 9 })).toBeNull();
-  });
-});
-
-describe("hasFallbackTarget", () => {
-  test("a different known-good sha is worth relaunching for", () => {
-    expect(hasFallbackTarget({ lastGoodSha: GOOD, failingSha: BAD, failureCount: 1 }, BAD)).toBe(
-      true,
-    );
-  });
-
-  test("nothing known-good means retrying is pointless", () => {
-    expect(hasFallbackTarget(INITIAL_CRASH_LOOP_STATE, BAD)).toBe(false);
-  });
-
-  test("the known-good sha crashing is the end of the road", () => {
-    // The fallback itself died fast; boot has run out of better ideas and lets
-    // the container exit rather than looping on the same commit forever.
-    expect(hasFallbackTarget({ lastGoodSha: GOOD, failingSha: GOOD, failureCount: 1 }, GOOD)).toBe(
-      false,
-    );
-  });
-});
-
-describe("the ladder, end to end", () => {
-  test("three fast crashes pin to last-good, and the branch moving on releases it", () => {
-    let state = recordRun(INITIAL_CRASH_LOOP_STATE, healthy(GOOD));
-
-    for (let i = 1; i <= CRASH_LOOP_THRESHOLD; i++) {
-      expect(fallbackSha(BAD, state)).toBeNull();
-      state = recordRun(state, crash(BAD));
-    }
-
-    // Threshold reached: boot runs GOOD instead of the tracked ref's tip.
-    expect(fallbackSha(BAD, state)).toBe(GOOD);
-    state = recordRun(state, healthy(GOOD));
-    expect(fallbackSha(BAD, state)).toBe(GOOD);
-
-    // A fix lands and the branch advances: the new tip is not quarantined, so
-    // the fallback lapses and the new commit runs.
-    expect(fallbackSha(NEXT, state)).toBeNull();
-    state = recordRun(state, healthy(NEXT));
-    expect(state.lastGoodSha).toBe(NEXT);
-  });
-});
-
-describe("crashLoopStatePath", () => {
-  test("defaults to the deployment-global engine dir when given no arg", () => {
-    // The guard is fleet-wide (#60/#62): its state lives beside the shared
-    // engine checkout at /data/engine, not under any tenant's state dir.
-    expect(crashLoopStatePath()).toBe(join(ENGINE_STATE_DIR, "engine-crash-loop.json"));
-  });
-
-  test("joins the record filename under an explicit engine dir", () => {
-    expect(crashLoopStatePath("/srv/engine")).toBe("/srv/engine/engine-crash-loop.json");
-  });
-});
-
-describe("persistence", () => {
-  let dir: string;
-  let path: string;
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "crash-loop-test-"));
-    path = crashLoopStatePath(join(dir, "state"));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+  test("writing creates the state dir when the volume is empty", () => {
+    const nested = join(dir, "not-yet-created");
+    realGuard(nested).record(healthyRun(GOOD));
+    expect(existsSync(join(nested, "engine-crash-loop.json"))).toBe(true);
   });
 
   test("state written by one boot is read back by the next", () => {
     // This is the whole "survives a container restart" claim.
-    const state: CrashLoopState = { lastGoodSha: GOOD, failingSha: BAD, failureCount: 3 };
-    writeCrashLoopState(path, state);
-    expect(readCrashLoopState(path)).toEqual(state);
-  });
+    const first = realGuard(dir);
+    first.record(healthyRun(GOOD));
+    for (let i = 0; i < THRESHOLD; i++) first.record(crashRun(BAD));
 
-  test("writing creates the state dir when the volume is empty", () => {
-    writeCrashLoopState(path, INITIAL_CRASH_LOOP_STATE);
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(INITIAL_CRASH_LOOP_STATE);
+    expect(realGuard(dir).fallbackFor(BAD)).toBe(GOOD);
   });
 
   test("no file yet means nothing is known — not an error", () => {
-    expect(readCrashLoopState(join(dir, "absent.json"))).toEqual(INITIAL_CRASH_LOOP_STATE);
+    const g = realGuard(dir);
+    expect(g.fallbackFor(BAD)).toBeNull();
+    expect(g.shouldRetry(crashRun(BAD))).toBe(false);
   });
 
   test("an unparseable file is discarded rather than crashing boot", () => {
     // A half-written file (container killed mid-write) must not brick the
     // bootstrapper; the worst case is losing one fallback target.
-    writeCrashLoopState(path, INITIAL_CRASH_LOOP_STATE);
-    writeFileSync(path, "{ not json");
-    expect(readCrashLoopState(path)).toEqual(INITIAL_CRASH_LOOP_STATE);
+    writeFileSync(join(dir, "engine-crash-loop.json"), "{ not json");
+    const g = realGuard(dir);
+    expect(g.fallbackFor(BAD)).toBeNull();
+    expect(g.shouldRetry(crashRun(BAD))).toBe(false);
   });
 
   test("a file of the wrong shape is discarded too", () => {
-    writeCrashLoopState(path, INITIAL_CRASH_LOOP_STATE);
-    writeFileSync(path, JSON.stringify({ lastGoodSha: 12, failureCount: "many" }));
-    expect(readCrashLoopState(path)).toEqual(INITIAL_CRASH_LOOP_STATE);
+    writeFileSync(
+      join(dir, "engine-crash-loop.json"),
+      JSON.stringify({ lastGoodSha: 12, failureCount: "many" }),
+    );
+    const g = realGuard(dir);
+    expect(g.fallbackFor(BAD)).toBeNull();
+    expect(g.shouldRetry(crashRun(BAD))).toBe(false);
   });
 });
 
 describe("createCrashGuard", () => {
-  let dir: string;
-  let path: string;
-  let events: CrashGuardEvent[];
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "crash-guard-test-"));
-    path = crashLoopStatePath(join(dir, "state"));
-    events = [];
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  const guard = () => createCrashGuard({ statePath: path, onEvent: (e) => events.push(e) });
-  const kinds = () => events.map((event) => event.kind);
-
   test("a healthy engine leaves the guard with nothing to do", () => {
-    const g = guard();
-    g.record(healthy(GOOD));
+    const { g, lines } = guard();
+    g.record(healthyRun(GOOD));
     expect(g.fallbackFor(GOOD)).toBeNull();
-    expect(g.shouldRetry(healthy(GOOD))).toBe(false);
-    expect(kinds()).toEqual(["last-good"]);
+    expect(g.shouldRetry(healthyRun(GOOD))).toBe(false);
+    expect(lines.map(kindOf)).toEqual(["last-good"]);
   });
 
   test("a crash-looping tip is pinned to the last-good commit once the threshold is met", () => {
-    const g = guard();
-    g.record(healthy(GOOD));
+    const { g, lines } = guard();
+    g.record(healthyRun(GOOD));
 
-    for (let i = 1; i <= CRASH_LOOP_THRESHOLD; i++) {
+    for (let i = 1; i <= THRESHOLD; i++) {
       expect(g.fallbackFor(BAD)).toBeNull();
       // Worth another go: there is a better commit to end up on.
-      expect(g.shouldRetry(crash(BAD))).toBe(true);
-      g.record(crash(BAD));
+      expect(g.shouldRetry(crashRun(BAD))).toBe(true);
+      g.record(crashRun(BAD));
     }
 
     expect(g.fallbackFor(BAD)).toBe(GOOD);
-    expect(kinds()).toEqual(["last-good", "crash", "crash", "crash", "fallback"]);
-    expect(events.at(-1)).toMatchObject({
-      kind: "fallback",
-      quarantinedSha: BAD,
-      lastGoodSha: GOOD,
-      failureCount: CRASH_LOOP_THRESHOLD,
-    });
+    expect(lines.map(kindOf)).toEqual(["last-good", "crash", "crash", "crash", "fallback"]);
+    expect(lines.at(-1)).toContain(`engine ${BAD}`);
+    expect(lines.at(-1)).toContain(`last-good ${GOOD}`);
   });
 
-  test("the pin outlives the container — a fresh guard reads the same verdict", () => {
-    const first = guard();
-    first.record(healthy(GOOD));
-    for (let i = 0; i < CRASH_LOOP_THRESHOLD; i++) first.record(crash(BAD));
-
+  test("a fresh guard reading from the same store sees the same verdict", () => {
     // A new boot, same state volume: it must not have to re-learn the crash.
-    events = [];
-    expect(guard().fallbackFor(BAD)).toBe(GOOD);
-    expect(kinds()).toEqual(["fallback"]);
+    const store = fakeStore();
+    const first = createCrashGuard({
+      engineDir: "/unused",
+      log: () => {},
+      store,
+      threshold: THRESHOLD,
+      healthyMs: HEALTHY_MS,
+    });
+    first.record(healthyRun(GOOD));
+    for (let i = 0; i < THRESHOLD; i++) first.record(crashRun(BAD));
+
+    const lines: string[] = [];
+    const second = createCrashGuard({
+      engineDir: "/unused",
+      log: (line) => lines.push(line),
+      store,
+      threshold: THRESHOLD,
+      healthyMs: HEALTHY_MS,
+    });
+    expect(second.fallbackFor(BAD)).toBe(GOOD);
+    expect(lines.map(kindOf)).toEqual(["fallback"]);
   });
 
   test("running the fallback does not un-quarantine the bad commit", () => {
-    const g = guard();
-    g.record(healthy(GOOD));
-    for (let i = 0; i < CRASH_LOOP_THRESHOLD; i++) g.record(crash(BAD));
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    for (let i = 0; i < THRESHOLD; i++) g.record(crashRun(BAD));
 
-    g.record(healthy(GOOD));
+    g.record(healthyRun(GOOD));
     expect(g.fallbackFor(BAD)).toBe(GOOD);
   });
 
   test("the tracked ref moving past the bad commit lifts the fallback, once", () => {
-    const g = guard();
-    g.record(healthy(GOOD));
-    for (let i = 0; i < CRASH_LOOP_THRESHOLD; i++) g.record(crash(BAD));
+    const { g, lines } = guard();
+    g.record(healthyRun(GOOD));
+    for (let i = 0; i < THRESHOLD; i++) g.record(crashRun(BAD));
     expect(g.fallbackFor(BAD)).toBe(GOOD);
 
-    events = [];
+    lines.length = 0;
     // A fix landed; the tip is a commit nobody has a verdict on, so it runs.
     expect(g.fallbackFor(NEXT)).toBeNull();
-    expect(events).toEqual([{ kind: "recovered", quarantinedSha: BAD, sha: NEXT }]);
+    expect(lines.map(kindOf)).toEqual(["recovered"]);
 
     // And the stale quarantine is gone rather than being re-announced forever.
-    events = [];
+    lines.length = 0;
     expect(g.fallbackFor(NEXT)).toBeNull();
-    expect(events).toEqual([]);
-    expect(readCrashLoopState(path).failingSha).toBeNull();
+    expect(lines).toEqual([]);
   });
 
   test("a crash with nothing known-good is not worth retrying", () => {
     // First boot onto a broken ref: there is no better commit to reach, so boot
     // lets the container exit where an operator can see it.
-    expect(guard().shouldRetry(crash(BAD))).toBe(false);
+    const { g } = guard();
+    expect(g.shouldRetry(crashRun(BAD))).toBe(false);
   });
 
   test("the fallback crashing too is the end of the road, and BAD stays quarantined", () => {
-    const g = guard();
-    g.record(healthy(GOOD));
-    for (let i = 0; i < CRASH_LOOP_THRESHOLD; i++) g.record(crash(BAD));
+    const { g, lines } = guard();
+    g.record(healthyRun(GOOD));
+    for (let i = 0; i < THRESHOLD; i++) g.record(crashRun(BAD));
     expect(g.fallbackFor(BAD)).toBe(GOOD);
 
-    expect(g.shouldRetry(crash(GOOD))).toBe(false);
-    events = [];
-    g.record(crash(GOOD));
-    expect(events).toEqual([
-      { kind: "fallback-crashed", sha: GOOD, quarantinedSha: BAD, exitCode: 1, elapsedMs: 400 },
-    ]);
+    expect(g.shouldRetry(crashRun(GOOD))).toBe(false);
+    lines.length = 0;
+    g.record(crashRun(GOOD));
+    expect(lines.map(kindOf)).toEqual(["fallback-crashed"]);
     // The container exits and comes back onto the same bad tip; the pin holds.
     expect(g.fallbackFor(BAD)).toBe(GOOD);
   });
@@ -384,62 +522,105 @@ describe("createCrashGuard", () => {
     // An engine up for a month that is then killed outright (host reboot, OOM)
     // exits without ever being judged. Without this, the bad commit waiting on
     // the branch would have nothing to fall back to.
-    const g = guard();
-    g.noteAlive(GOOD, HEALTHY_RUN_MS);
-    expect(kinds()).toEqual(["last-good"]);
-    expect(readCrashLoopState(path).lastGoodSha).toBe(GOOD);
+    const { g, lines } = guard();
+    g.noteAlive(GOOD, HEALTHY_MS);
+    expect(lines.map(kindOf)).toEqual(["last-good"]);
 
     // Only once, though — every poll tick calls this.
-    events = [];
-    g.noteAlive(GOOD, HEALTHY_RUN_MS * 10);
-    expect(events).toEqual([]);
+    lines.length = 0;
+    g.noteAlive(GOOD, HEALTHY_MS * 10);
+    expect(lines).toEqual([]);
   });
 
   test("a young engine has not proved anything yet", () => {
-    const g = guard();
-    g.noteAlive(BAD, HEALTHY_RUN_MS - 1);
-    expect(events).toEqual([]);
-    expect(readCrashLoopState(path)).toEqual(INITIAL_CRASH_LOOP_STATE);
+    const { g, lines } = guard();
+    g.noteAlive(BAD, HEALTHY_MS - 1);
+    expect(lines).toEqual([]);
+    expect(g.fallbackFor(BAD)).toBeNull();
   });
 
   test("an engine outliving the window while a commit is quarantined keeps the quarantine", () => {
-    const g = guard();
-    g.record(healthy(GOOD));
-    for (let i = 0; i < CRASH_LOOP_THRESHOLD; i++) g.record(crash(BAD));
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    for (let i = 0; i < THRESHOLD; i++) g.record(crashRun(BAD));
 
     // The fallback run of GOOD survives the window — that must not free BAD.
-    g.noteAlive(GOOD, HEALTHY_RUN_MS * 5);
+    g.noteAlive(GOOD, HEALTHY_MS * 5);
     expect(g.fallbackFor(BAD)).toBe(GOOD);
   });
 
   test("a healthy exit is never a reason to relaunch", () => {
-    const g = guard();
-    g.record(healthy(GOOD));
-    expect(g.shouldRetry({ sha: BAD, exitCode: 0, elapsedMs: 5, requestedStop: false })).toBe(
-      false,
-    );
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    expect(
+      g.shouldRetry({
+        engine: launchedEngine(BAD, true),
+        exit: { code: 0, signal: null },
+        elapsedMs: 5,
+        requestedStop: false,
+      }),
+    ).toBe(false);
   });
 
   test("a run boot cut short is not a reason to relaunch either", () => {
     // Boot is already deciding what happens next; a stop is not a crash.
-    const g = guard();
-    g.record(healthy(GOOD));
-    expect(g.shouldRetry({ sha: BAD, exitCode: 1, elapsedMs: 5, requestedStop: true })).toBe(false);
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    expect(
+      g.shouldRetry({
+        engine: launchedEngine(BAD, true),
+        exit: { code: 1, signal: null },
+        elapsedMs: 5,
+        requestedStop: true,
+      }),
+    ).toBe(false);
   });
 
   test("an unwritable state dir is reported, not thrown — boot still runs", () => {
     // The state volume is missing or read-only. Losing the fallback is bad;
-    // refusing to run the engine over it would be worse.
-    const blocked = join(dir, "file");
-    writeFileSync(blocked, "not a directory");
+    // refusing to run the engine over it would be worse. Provoked with a
+    // throwing fake store rather than a chmod (#77).
+    const throwingStore: CrashLoopStore = {
+      read: () => ({ lastGoodSha: null, failingSha: null, failureCount: 0 }),
+      write: () => {
+        throw new Error("EACCES: permission denied");
+      },
+    };
+    const lines: string[] = [];
     const g = createCrashGuard({
-      statePath: join(blocked, "state.json"),
-      onEvent: (event) => events.push(event),
+      engineDir: "/unused",
+      log: (line) => lines.push(line),
+      store: throwingStore,
+      threshold: THRESHOLD,
+      healthyMs: HEALTHY_MS,
     });
 
-    expect(() => g.record(healthy(GOOD))).not.toThrow();
-    expect(kinds()).toContain("persist-failed");
+    expect(() => g.record(healthyRun(GOOD))).not.toThrow();
+    expect(lines.map(kindOf)).toContain("persist-failed");
     // In-memory bookkeeping still works for the life of this container.
-    expect(g.shouldRetry(crash(BAD))).toBe(true);
+    expect(g.shouldRetry(crashRun(BAD))).toBe(true);
+  });
+
+  test("a run with no commit to judge is dropped", () => {
+    // A local mount has no commit to say anything about — nothing to record.
+    const { g, lines } = guard();
+    g.record({
+      engine: launchedEngine(null, false),
+      exit: { code: 1, signal: null },
+      elapsedMs: 5,
+      requestedStop: false,
+    });
+    expect(lines).toEqual([]);
+    expect(g.fallbackFor(BAD)).toBeNull();
+  });
+
+  test("only a guarded launch is retried after a crash", () => {
+    // A pinned ref that crashes takes the container down, exactly as it did
+    // before there was a guard — retrying is only for a launch tracking a
+    // moving branch.
+    const { g } = guard();
+    g.record(healthyRun(GOOD));
+    expect(g.shouldRetry(crashRun(BAD, { guarded: false }))).toBe(false);
+    expect(g.shouldRetry(crashRun(BAD, { guarded: true }))).toBe(true);
   });
 });

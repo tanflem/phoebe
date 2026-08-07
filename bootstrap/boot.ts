@@ -36,13 +36,7 @@ import {
   type ResolvedConfiguration,
 } from "../src/config-resolution.ts";
 import { loadUserConfig, resolveConfigPath } from "../src/load-config.ts";
-import {
-  crashLoopStatePath,
-  createCrashGuard,
-  type CrashGuard,
-  type CrashGuardEvent,
-  type RunOutcome,
-} from "./crash-loop.ts";
+import { createCrashGuard, type CrashGuard } from "./crash-loop.ts";
 import type { ResolvedEngineSource } from "./engine-source.ts";
 import { lsRemoteBranchSha, materializeGithubEngine } from "./github-engine.ts";
 import { buildEngineChildEnv, parseDotenv } from "./engine-child-env.ts";
@@ -68,7 +62,6 @@ import {
   DEFAULT_RECONCILE_DRAIN_TIMEOUT_MS,
   DEFAULT_RECONCILE_INTERVAL_MS,
   type EngineExit,
-  type EngineRun,
   type LaunchedEngine,
   type SupervisedChild,
 } from "./reconcile.ts";
@@ -427,73 +420,9 @@ function spawnSupervised(
  */
 function createBootCrashGuard(): CrashGuard {
   return createCrashGuard({
-    statePath: crashLoopStatePath(engineBaseDir()),
-    onEvent: logCrashGuardEvent,
+    engineDir: engineBaseDir(),
+    log: (line) => console.error(line),
   });
-}
-
-/**
- * The guard's decisions, in an operator's terms. A container quietly serving
- * older code than its config asks for is exactly the confusion these lines
- * exist to prevent, so every fallback event names both commits.
- */
-function logCrashGuardEvent(event: CrashGuardEvent): void {
-  switch (event.kind) {
-    case "crash":
-      console.error(
-        `[phoebe] boot: engine ${event.sha} exited ${event.exitCode} after ` +
-          `${Math.round(event.elapsedMs / 1000)}s — fast crash ${event.failureCount}/${event.threshold}.`,
-      );
-      return;
-    case "last-good":
-      console.log(
-        `[phoebe] boot: engine ${event.sha} ran healthily — recorded as the crash-loop fallback target.`,
-      );
-      return;
-    case "fallback":
-      console.error(
-        `[phoebe] boot: engine ${event.quarantinedSha} crash-looped ${event.failureCount}× — ` +
-          `falling back to last-good ${event.lastGoodSha}, and staying there until the tracked ` +
-          `ref moves past the bad commit.`,
-      );
-      return;
-    case "fallback-crashed":
-      console.error(
-        `[phoebe] boot: the last-good engine ${event.sha} crashed too ` +
-          `(exit ${event.exitCode} after ${Math.round(event.elapsedMs / 1000)}s) — ` +
-          `${event.quarantinedSha} stays quarantined and the container will exit.`,
-      );
-      return;
-    case "recovered":
-      console.log(
-        `[phoebe] boot: tracked ref advanced to ${event.sha}, past quarantined ` +
-          `${event.quarantinedSha} — crash-loop fallback lifted.`,
-      );
-      return;
-    case "persist-failed":
-      console.warn(
-        `[phoebe] boot: could not write crash-loop state to ${event.path} — ` +
-          `${describe(event.error)}. The fallback will not survive a container restart.`,
-      );
-      return;
-  }
-}
-
-/**
- * A finished run as the crash-loop guard sees it, or null when there is no
- * commit to say anything about (a local mount). Note this is *not* gated on
- * `guarded`: what a pinned launch proved is still worth remembering — it only
- * must not cause a fallback — and recording it means an operator who later moves
- * that deployment onto a branch already has a target to fall back to.
- */
-function runOutcome(run: EngineRun): RunOutcome | null {
-  if (run.engine.sha === null) return null;
-  return {
-    sha: run.engine.sha,
-    exitCode: run.exit.code,
-    elapsedMs: run.elapsedMs,
-    requestedStop: run.requestedStop,
-  };
 }
 
 /**
@@ -804,18 +733,12 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
       stop,
       intervalMs,
       drainTimeoutMs: reconcileDrainTimeoutMs(),
-      onRunEnd: (run) => {
-        const outcome = runOutcome(run);
-        if (outcome !== null) guard.record(outcome);
-      },
+      onRunEnd: (run) => guard.record(run),
       onRunTick: ({ engine, elapsedMs }) => {
         if (engine.sha !== null) guard.noteAlive(engine.sha, elapsedMs);
       },
       relaunchAfterExit: (run) => {
-        // Only a guarded launch retries: a pinned ref that crashes takes the
-        // container down, exactly as it did before there was a guard.
-        const outcome = run.engine.guarded ? runOutcome(run) : null;
-        if (outcome === null || !guard.shouldRetry(outcome)) return false;
+        if (!guard.shouldRetry(run)) return false;
         console.log(
           `[phoebe] boot: relaunching the engine in ${Math.round(CRASH_BACKOFF_MS / 1000)}s — ` +
             `a last-good engine commit is available to fall back to.`,

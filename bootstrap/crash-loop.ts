@@ -9,9 +9,10 @@
 //
 // This module is that record and the decisions over it — pure folds plus a JSON
 // file — so the whole ladder (first crash → threshold → fallback → recovery) is
-// tested without spawning an engine. The wiring (when a run ends, what to
-// materialize, what to log) lives in boot.ts; the loop that calls it is
-// reconcile.ts.
+// tested without spawning an engine. The wording an operator sees is the
+// module's too (`describeEvent` below); only the sink (`log`) is the caller's.
+// The wiring — when a run ends, what dir the record lives under — is boot.ts;
+// the loop that calls it is reconcile.ts.
 //
 // The record is deployment-global: one guard about one engine SHA for the whole
 // fleet (#60). It lives beside the shared engine checkout on the `phoebe-engine`
@@ -29,34 +30,27 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { EngineRun } from "./reconcile.ts";
 
 /**
  * Consecutive fast crashes of one engine SHA before boot pins back to the
  * last-good one. Three is enough to rule out a one-off (a flaky network on the
  * engine's first fetch, a busy host) while still recovering in minutes.
  */
-export const CRASH_LOOP_THRESHOLD = 3;
+const CRASH_LOOP_THRESHOLD = 3;
 
 /**
  * How long an engine run must survive to count as healthy. A commit that cannot
  * boot dies well inside this; a long-lived engine that later hits a runtime
  * error does not, and pinning to older code would not help it.
  */
-export const HEALTHY_RUN_MS = 60_000;
-
-/**
- * Deployment-global home for the shared engine checkout and this record (#60/#62).
- * The `phoebe-engine` volume mounts here; `PHOEBE_ENGINE_DIR` overrides it for
- * host/dev (see boot.ts `engineBaseDir`). It sits outside the per-tenant
- * `/data/repos/<owner>/<repo>` namespace — one guard, one engine SHA, all tenants.
- */
-export const ENGINE_STATE_DIR = "/data/engine";
+const HEALTHY_RUN_MS = 60_000;
 
 /** Filename of the crash-loop record inside the engine dir. */
-export const CRASH_LOOP_STATE_FILE = "engine-crash-loop.json";
+const CRASH_LOOP_STATE_FILE = "engine-crash-loop.json";
 
 /** Crash-loop bookkeeping, persisted across container restarts on the state volume. */
-export type CrashLoopState = {
+type CrashLoopState = {
   /** SHA that last ran healthily — the fallback target. */
   lastGoodSha: string | null;
   /** SHA currently accumulating fast-crash counts (or quarantined as bad). */
@@ -66,14 +60,14 @@ export type CrashLoopState = {
 };
 
 /** Nothing known yet: no proven commit, no quarantine. */
-export const INITIAL_CRASH_LOOP_STATE: CrashLoopState = {
+const INITIAL_CRASH_LOOP_STATE: CrashLoopState = {
   lastGoodSha: null,
   failingSha: null,
   failureCount: 0,
 };
 
 /** A finished engine run, as the fallback policy sees it. */
-export type RunOutcome = {
+type RunOutcome = {
   /** The engine commit that was running. */
   sha: string;
   /** Its exit code; null when a signal killed it. */
@@ -88,8 +82,22 @@ export type RunOutcome = {
   requestedStop: boolean;
 };
 
+/**
+ * `record`/`shouldRetry`'s outcome, dropped for a run with nothing to say
+ * anything about — a local mount has no commit to judge (the null-sha drop).
+ */
+function toRunOutcome(run: EngineRun): RunOutcome | null {
+  if (run.engine.sha === null) return null;
+  return {
+    sha: run.engine.sha,
+    exitCode: run.exit.code,
+    elapsedMs: run.elapsedMs,
+    requestedStop: run.requestedStop,
+  };
+}
+
 /** What a finished run proved about the commit it was running. */
-export type RunVerdict =
+type RunVerdict =
   /** The commit works — it lived past the healthy window, or finished its own work. */
   | "healthy"
   /** The commit dies on startup: the thing the fallback exists to catch. */
@@ -104,7 +112,7 @@ export type RunVerdict =
  * would promote the crashing commit to last-good and disarm the fallback for
  * good.
  */
-export function judgeRun(run: RunOutcome, healthyMs: number = HEALTHY_RUN_MS): RunVerdict {
+function judgeRun(run: RunOutcome, healthyMs: number): RunVerdict {
   // Living past the window proves the commit boots, however the run then ended.
   if (run.elapsedMs >= healthyMs) return "healthy";
   // Boot pulled the plug before the window was up: no verdict either way.
@@ -126,13 +134,12 @@ export function judgeRun(run: RunOutcome, healthyMs: number = HEALTHY_RUN_MS): R
  * against its own SHA, starting over whenever the failing SHA moves — except
  * against an *active* quarantine, which outlives it.
  */
-export function recordRun(
+function recordRun(
   state: CrashLoopState,
   run: RunOutcome,
-  opts: { healthyMs?: number; threshold?: number } = {},
+  opts: { healthyMs: number; threshold: number },
 ): CrashLoopState {
-  const threshold = opts.threshold ?? CRASH_LOOP_THRESHOLD;
-  switch (judgeRun(run, opts.healthyMs ?? HEALTHY_RUN_MS)) {
+  switch (judgeRun(run, opts.healthyMs)) {
     case "inconclusive":
       return state;
     case "healthy": {
@@ -148,7 +155,7 @@ export function recordRun(
       // The fallback crashing too does not exonerate the commit it is standing
       // in for: the quarantine has to hold until the tracked ref moves past the
       // bad SHA, so a crash of some other commit must not overwrite it.
-      if (state.failingSha !== null && state.failureCount >= threshold) return state;
+      if (state.failingSha !== null && state.failureCount >= opts.threshold) return state;
       return { lastGoodSha: state.lastGoodSha, failingSha: run.sha, failureCount: 1 };
     }
   }
@@ -161,7 +168,7 @@ export function recordRun(
  * Without this, a first-ever bad ref — or a fallback that crashes too — would
  * relaunch forever instead of failing where an operator can see it.
  */
-export function hasFallbackTarget(state: CrashLoopState, crashedSha: string): boolean {
+function hasFallbackTarget(state: CrashLoopState, crashedSha: string): boolean {
   return state.lastGoodSha !== null && state.lastGoodSha !== crashedSha;
 }
 
@@ -172,23 +179,18 @@ export function hasFallbackTarget(state: CrashLoopState, crashedSha: string): bo
  * the fallback lapses by itself the moment the branch advances past the bad SHA,
  * which is exactly "fallback persists until the ref moves on".
  */
-export function fallbackSha(
-  targetSha: string,
-  state: CrashLoopState,
-  threshold: number = CRASH_LOOP_THRESHOLD,
-): string | null {
+function fallbackSha(targetSha: string, state: CrashLoopState, threshold: number): string | null {
   if (state.failingSha !== targetSha || state.failureCount < threshold) return null;
   return hasFallbackTarget(state, targetSha) ? state.lastGoodSha : null;
 }
 
 /**
- * The crash-loop record's path inside the deployment-global engine dir. No
- * longer takes a tenant `stateDir` (#60/#62): the guard is fleet-wide, so its
- * state co-locates with the shared engine checkout at `/data/engine`, not under
- * any tenant's `/data/repos/<owner>/<repo>/state`. `engineDir` is the engine
- * checkout base (boot.ts `engineBaseDir`), defaulting to `ENGINE_STATE_DIR`.
+ * The crash-loop record's path inside the deployment-global engine dir
+ * (`engineDir`, boot.ts's `engineBaseDir()`) — one guard, one engine SHA, all
+ * tenants, colocated with the shared engine checkout rather than any tenant's
+ * state dir (#60/#62).
  */
-export function crashLoopStatePath(engineDir: string = ENGINE_STATE_DIR): string {
+function crashLoopStatePath(engineDir: string): string {
   return join(engineDir, CRASH_LOOP_STATE_FILE);
 }
 
@@ -208,7 +210,7 @@ function isCrashLoopState(value: unknown): value is CrashLoopState {
  * degrades to "nothing known" rather than failing boot: the cost is losing one
  * fallback target, and the alternative is a bootstrapper that a bad file bricks.
  */
-export function readCrashLoopState(path: string): CrashLoopState {
+function readCrashLoopState(path: string): CrashLoopState {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
     if (!isCrashLoopState(parsed)) return INITIAL_CRASH_LOOP_STATE;
@@ -227,18 +229,33 @@ export function readCrashLoopState(path: string): CrashLoopState {
  * genuinely unwritable state dir; the guard turns that into an event, since
  * losing the fallback is better than refusing to run the engine.
  */
-export function writeCrashLoopState(path: string, state: CrashLoopState): void {
+function writeCrashLoopState(path: string, state: CrashLoopState): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
 }
 
+/** Where the guard persists its record — injectable so tests need no temp dir. */
+type CrashLoopStore = {
+  read(): CrashLoopState;
+  write(state: CrashLoopState): void;
+};
+
+/** The real store: a JSON file under the deployment-global engine dir. */
+function defaultCrashLoopStore(path: string): CrashLoopStore {
+  return {
+    read: () => readCrashLoopState(path),
+    write: (state) => writeCrashLoopState(path, state),
+  };
+}
+
 /**
- * Everything the guard decides that is worth telling an operator about. Emitted
- * rather than logged so the policy stays testable and boot.ts owns the wording —
- * a container silently serving older code than its config asks for is exactly
- * the confusing situation these lines exist to prevent.
+ * Everything the guard decides that is worth telling an operator about, in its
+ * own words. Kept as data internally so the fold that produces it stays
+ * testable independent of the wording, but the wording — a container silently
+ * serving older code than its config asks for is exactly the confusing
+ * situation these lines exist to prevent — is the module's, not the caller's.
  */
-export type CrashGuardEvent =
+type CrashGuardEvent =
   | {
       kind: "crash";
       sha: string;
@@ -263,6 +280,45 @@ export type CrashGuardEvent =
   | { kind: "recovered"; quarantinedSha: string; sha: string }
   | { kind: "persist-failed"; path: string; error: unknown };
 
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Render a guard event the way an operator sees it in the container logs. */
+function describeEvent(event: CrashGuardEvent): string {
+  switch (event.kind) {
+    case "crash":
+      return (
+        `[phoebe] boot: engine ${event.sha} exited ${event.exitCode} after ` +
+        `${Math.round(event.elapsedMs / 1000)}s — fast crash ${event.failureCount}/${event.threshold}.`
+      );
+    case "last-good":
+      return `[phoebe] boot: engine ${event.sha} ran healthily — recorded as the crash-loop fallback target.`;
+    case "fallback":
+      return (
+        `[phoebe] boot: engine ${event.quarantinedSha} crash-looped ${event.failureCount}× — ` +
+        `falling back to last-good ${event.lastGoodSha}, and staying there until the tracked ` +
+        `ref moves past the bad commit.`
+      );
+    case "fallback-crashed":
+      return (
+        `[phoebe] boot: the last-good engine ${event.sha} crashed too ` +
+        `(exit ${event.exitCode} after ${Math.round(event.elapsedMs / 1000)}s) — ` +
+        `${event.quarantinedSha} stays quarantined and the container will exit.`
+      );
+    case "recovered":
+      return (
+        `[phoebe] boot: tracked ref advanced to ${event.sha}, past quarantined ` +
+        `${event.quarantinedSha} — crash-loop fallback lifted.`
+      );
+    case "persist-failed":
+      return (
+        `[phoebe] boot: could not write crash-loop state to ${event.path} — ` +
+        `${describeError(event.error)}. The fallback will not survive a container restart.`
+      );
+  }
+}
+
 /**
  * The crash-loop guard boot supervises with: the persisted record, held in
  * memory for the life of the container and written through on every change.
@@ -273,8 +329,14 @@ export type CrashGuard = {
    * run the target. Called once per launch, before the engine is spawned.
    */
   fallbackFor: (targetSha: string) => string | null;
-  /** Fold a finished run into the record and persist it. */
-  record: (run: RunOutcome) => void;
+  /**
+   * Fold a finished run into the record and persist it. Every run is recorded,
+   * not only guarded launches: what a pinned launch proved is still worth
+   * remembering, so an operator who later moves that deployment onto a branch
+   * already has a target to fall back to. A run with no commit to judge (a
+   * local mount) is dropped.
+   */
+  record: (run: EngineRun) => void;
   /**
    * A commit is still running, and has been for `elapsedMs`. Once that passes
    * the healthy window the commit has proved itself, so it is banked as the
@@ -284,36 +346,42 @@ export type CrashGuard = {
    */
   noteAlive: (sha: string, elapsedMs: number) => void;
   /**
-   * Is relaunching after this run worth it? Only for a crash, and only when a
-   * *different* known-good commit exists to end up on — otherwise boot lets the
-   * container exit rather than loop on the same broken commit forever. The
-   * answer does not depend on whether `record` ran first: folding a crash in
-   * never changes which commit is last-good.
+   * Is relaunching after this run worth it? Only for a guarded launch — a pinned
+   * ref that crashes takes the container down, exactly as it did before there
+   * was a guard — and only when a *different* known-good commit exists to end up
+   * on, otherwise boot lets the container exit rather than loop on the same
+   * broken commit forever. The answer does not depend on whether `record` ran
+   * first: folding a crash in never changes which commit is last-good.
    */
-  shouldRetry: (run: RunOutcome) => boolean;
+  shouldRetry: (run: EngineRun) => boolean;
 };
 
 export function createCrashGuard(deps: {
-  /** The record's path, resolved from the mounted config at boot. */
-  statePath: string;
-  onEvent?: (event: CrashGuardEvent) => void;
+  /** The deployment-global engine checkout dir the record lives beside. */
+  engineDir: string;
+  /** Where the guard's decisions go, already worded for an operator. */
+  log: (line: string) => void;
+  /** Defaults to a JSON file at `crashLoopStatePath(engineDir)`. */
+  store?: CrashLoopStore;
   threshold?: number;
   healthyMs?: number;
 }): CrashGuard {
   const threshold = deps.threshold ?? CRASH_LOOP_THRESHOLD;
   const healthyMs = deps.healthyMs ?? HEALTHY_RUN_MS;
   const options = { threshold, healthyMs };
-  const emit = (event: CrashGuardEvent) => deps.onEvent?.(event);
-  let state = readCrashLoopState(deps.statePath);
+  const path = crashLoopStatePath(deps.engineDir);
+  const store = deps.store ?? defaultCrashLoopStore(path);
+  const emit = (event: CrashGuardEvent) => deps.log(describeEvent(event));
+  let state = store.read();
 
   const persist = (next: CrashLoopState) => {
     state = next;
     try {
-      writeCrashLoopState(deps.statePath, next);
+      store.write(next);
     } catch (error) {
       // In-memory bookkeeping still guards this container's life; only the
       // across-restart half is lost.
-      emit({ kind: "persist-failed", path: deps.statePath, error });
+      emit({ kind: "persist-failed", path, error });
     }
   };
 
@@ -342,36 +410,39 @@ export function createCrashGuard(deps: {
     },
 
     record(run) {
+      const outcome = toRunOutcome(run);
+      if (outcome === null) return;
+
       const before = state;
-      const verdict = judgeRun(run, healthyMs);
-      persist(recordRun(before, run, options));
+      const verdict = judgeRun(outcome, healthyMs);
+      persist(recordRun(before, outcome, options));
 
       if (verdict === "inconclusive") return;
       if (verdict === "healthy") {
-        if (state.lastGoodSha !== before.lastGoodSha) emit({ kind: "last-good", sha: run.sha });
+        if (state.lastGoodSha !== before.lastGoodSha) emit({ kind: "last-good", sha: outcome.sha });
         return;
       }
       if (
         before.failingSha !== null &&
-        before.failingSha !== run.sha &&
+        before.failingSha !== outcome.sha &&
         before.failureCount >= threshold
       ) {
         // A crash the quarantine swallowed — this is the fallback itself dying,
         // which reads very differently in a log to the tracked ref dying.
         emit({
           kind: "fallback-crashed",
-          sha: run.sha,
+          sha: outcome.sha,
           quarantinedSha: before.failingSha,
-          exitCode: run.exitCode,
-          elapsedMs: run.elapsedMs,
+          exitCode: outcome.exitCode,
+          elapsedMs: outcome.elapsedMs,
         });
         return;
       }
       emit({
         kind: "crash",
-        sha: run.sha,
-        exitCode: run.exitCode,
-        elapsedMs: run.elapsedMs,
+        sha: outcome.sha,
+        exitCode: outcome.exitCode,
+        elapsedMs: outcome.elapsedMs,
         failureCount: state.failureCount,
         threshold,
       });
@@ -384,7 +455,10 @@ export function createCrashGuard(deps: {
     },
 
     shouldRetry(run) {
-      return judgeRun(run, healthyMs) === "crash" && hasFallbackTarget(state, run.sha);
+      if (!run.engine.guarded) return false;
+      const outcome = toRunOutcome(run);
+      if (outcome === null) return false;
+      return judgeRun(outcome, healthyMs) === "crash" && hasFallbackTarget(state, outcome.sha);
     },
   };
 }

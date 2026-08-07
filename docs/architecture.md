@@ -162,9 +162,11 @@ and disarm the fallback for good. A commit that outlives the window is banked as
 last-good **while it is still running**, so an engine up for weeks that is then
 killed outright still leaves a fallback target behind.
 
-The record — last-good SHA, quarantined SHA, crash count — is JSON in
-`paths.stateDir` (`engine-crash-loop.json`), so it survives the container restart
-a crash-looping engine causes. The guard is inert unless the engine ref is a
+The record — last-good SHA, quarantined SHA, crash count — is JSON at
+`/data/engine/engine-crash-loop.json`: deployment-global, beside the shared
+engine checkout, not under any tenant's `paths.stateDir` — the guard judges the
+engine, not any tenant. It survives the container restart a crash-looping engine
+causes. The guard is inert unless the engine ref is a
 **moving branch** (a local mount has no commit to pin; a pinned SHA or tag means
 the operator chose that exact commit, and quietly serving a different one would
 be worse than crash-looping visibly) and inert with nothing known-good yet — a
