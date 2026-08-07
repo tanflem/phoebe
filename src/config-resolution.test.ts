@@ -7,6 +7,7 @@ import {
   formatResolvedConfiguration,
   loadResolvedConfiguration,
   parseBaseConfigDocument,
+  parseResolvedConfigurationSnapshot,
   resolveLayeredConfiguration,
 } from "./config-resolution.ts";
 import { applyEnvOverlay } from "./load-config.ts";
@@ -309,5 +310,38 @@ describe("loadResolvedConfiguration", () => {
       },
     });
     expect(first).not.toContain("must-not-leak");
+  });
+});
+
+describe("parseResolvedConfigurationSnapshot", () => {
+  // #37: a boot-supervised child parses boot's snapshot; a directly-invoked
+  // engine resolves the authored files itself. Both must thread the same
+  // `PHOEBE_DATA_DIR`-derived data base into `resolveConfig`, or the two entry
+  // points derive different `config.paths` for identical environments.
+  test("matches direct resolution's paths for a non-default data base", () => {
+    const repository = repositoryConfig();
+    const direct = resolveLayeredConfiguration({
+      repository,
+      dataBase: "/custom/data",
+    });
+    const snapshot = formatResolvedConfiguration(direct);
+
+    const fromSnapshot = parseResolvedConfigurationSnapshot(snapshot, {
+      dataBase: "/custom/data",
+    });
+
+    expect(fromSnapshot.config.paths).toEqual(direct.config.paths);
+    expect(fromSnapshot.config.paths).toEqual(derivePaths("acme/widget", "/custom/data"));
+  });
+
+  test("defaults paths to the default data base when no override is given", () => {
+    const repository = repositoryConfig();
+    const direct = resolveLayeredConfiguration({ repository });
+    const snapshot = formatResolvedConfiguration(direct);
+
+    const fromSnapshot = parseResolvedConfigurationSnapshot(snapshot);
+
+    expect(fromSnapshot.config.paths).toEqual(direct.config.paths);
+    expect(fromSnapshot.config.paths).toEqual(derivePaths("acme/widget"));
   });
 });

@@ -415,7 +415,10 @@ export function formatResolvedConfiguration(resolved: ResolvedConfiguration): st
  * uses this instead of re-reading mutable authored files, so engine source and
  * runtime config are one atomic resolution even across an in-between edit.
  */
-export function parseResolvedConfigurationSnapshot(contents: string): ResolvedConfiguration {
+export function parseResolvedConfigurationSnapshot(
+  contents: string,
+  opts: { dataBase?: string } = {},
+): ResolvedConfiguration {
   let parsed: unknown;
   try {
     parsed = JSON.parse(contents);
@@ -433,7 +436,7 @@ export function parseResolvedConfigurationSnapshot(contents: string): ResolvedCo
   }
   const { engine, ...runtime } = parsed["config"];
   validateEngineSourceField(engine, `${BOOTSTRAP_RESOLVED_CONFIG_ENV}.config.engine`);
-  const config = resolveConfig(runtime as PhoebeUserConfig);
+  const config = resolveConfig(runtime as PhoebeUserConfig, { dataBase: opts.dataBase });
   validateWorkOrder(config.workOrder);
   return { config, engine: resolveEngineSource(engine) };
 }

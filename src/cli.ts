@@ -272,7 +272,7 @@ export function loadEngineConfiguration(
   const snapshot = env[BOOTSTRAP_RESOLVED_CONFIG_ENV];
   return snapshot === undefined
     ? loadResolvedConfiguration(configPath, { env, dataBase })
-    : Promise.resolve(parseResolvedConfigurationSnapshot(snapshot));
+    : Promise.resolve(parseResolvedConfigurationSnapshot(snapshot, { dataBase }));
 }
 
 export function parseStatusArgs(argv: readonly string[]): ParsedStatusArgs {
