@@ -43,7 +43,12 @@ import { resolveConfigPath } from "./load-config.ts";
 import { resolveDataBase } from "./paths.ts";
 import { setResolvedConfig } from "./resolved-config.ts";
 import { parseSetupArgs, runSetup, SETUP_HELP_TEXT } from "./setup.ts";
-import { ContractCapabilityError, STATUS_SCHEMA_VERSION } from "./status-contract.ts";
+import {
+  ContractCapabilityError,
+  STATUS_SCHEMA_VERSION,
+  type StatusSnapshot,
+  workIdentityId,
+} from "./status-contract.ts";
 import { readStatusSnapshot } from "./status-store.ts";
 import {
   addRepo,
@@ -459,10 +464,39 @@ function formatQueueLookahead(queue: TenantListing["queue"]): string {
   return `queue: ${shown}${rest > 0 ? ` (+${rest} more)` : ""}`;
 }
 
-function formatTenantListing(listing: TenantListing): string {
+/**
+ * Render one tenant's engine state from its status-v2 lifecycle — a `stopped`,
+ * `draining`, or `failed` tenant must read as such, not as `idle` (a silent
+ * "no status" or "idle" reading here is indistinguishable from a tenant that
+ * never booted, which is the case a mid-fleet-upgrade version mismatch costs
+ * the most).
+ */
+function formatSnapshotState(snapshot: StatusSnapshot): string {
+  const { state } = snapshot.lifecycle;
+  if (state === "running" && snapshot.activeWork) {
+    const work = snapshot.activeWork;
+    return `working ${work.kind} #${workIdentityId(work) ?? work.workId}`;
+  }
+  if (state === "draining") return "draining";
+  if (state === "stopped") return "stopped";
+  if (state === "failed") return `failed — ${snapshot.lifecycle.reason ?? "unknown reason"}`;
+  return "idle"; // starting / selecting / idle / running-with-no-activeWork
+}
+
+function formatTenantStatus(status: TenantListing["status"]): string {
+  if (status === null) return "no status";
+  if (!status.available) {
+    if (status.reason === "unsupported-version") {
+      return `status from a newer engine (${status.receivedVersion})`;
+    }
+    return status.reason === "not-found" ? "no status" : "unreadable status";
+  }
+  return formatSnapshotState(status.status);
+}
+
+export function formatTenantListing(listing: TenantListing): string {
   const flag = (label: string, on: boolean): string => `${on ? "✓" : "✗"} ${label}`;
-  const unit = listing.status?.currentUnit;
-  const state = unit ? `working ${unit.kind} #${unit.id}` : listing.status ? "idle" : "no status";
+  const state = formatTenantStatus(listing.status);
   return (
     `  ${listing.slug}\n` +
     `      ${flag("config", listing.configValid)}  ${flag("env", listing.envPresent)}  ` +
@@ -471,7 +505,7 @@ function formatTenantListing(listing: TenantListing): string {
   );
 }
 
-/** `phoebe list` — enumerate tenants + health (reads status.json). */
+/** `phoebe list` — enumerate tenants + health (reads the status-v2 contract snapshot). */
 async function runListCli(): Promise<void> {
   const listings = await listTenants({
     configDir: process.cwd(),

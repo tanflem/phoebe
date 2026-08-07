@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "status-v2",
+  "updatedAt": "2026-07-30T12:06:00.000Z",
+  "runtime": {
+    "runtimeId": "runtime-1",
+    "instanceId": "instance-1",
+    "startedAt": "2026-07-30T11:00:00.000Z"
+  },
+  "repository": {
+    "slug": "owner/repo",
+    "url": "https://github.com/owner/repo",
+    "defaultBranch": "main"
+  },
+  "digests": {
+    "engine": "sha256:engine",
+    "bootstrap": "sha256:bootstrap",
+    "config": "sha256:config",
+    "policy": "sha256:policy",
+    "prompts": "sha256:prompts",
+    "providerModel": "sha256:provider-model"
+  },
+  "capabilities": ["status-v2", "events-v1", "events-replay-v1", "events-range-v1"],
+  "lifecycle": { "state": "failed", "reason": "State volume unwritable after 3 retries." },
+  "activeWork": null,
+  "queue": [{ "issueNumber": 42, "blockedBy": [], "workable": true }],
+  "lastSuccess": null,
+  "lastFailure": {
+    "eventId": "event-6",
+    "sequence": 6,
+    "workId": "issues:42",
+    "outcome": "infrastructure-failure",
+    "endedAt": "2026-07-30T12:06:00.000Z",
+    "failureCategory": "state-volume"
+  },
+  "control": {
+    "retry": { "attempt": 3 },
+    "backoff": { "active": false },
+    "quarantine": { "active": false },
+    "drain": { "requested": false }
+  },
+  "health": {
+    "state": "unhealthy",
+    "telemetry": {
+      "writable": false,
+      "lastError": "ENOSPC: no space left on device",
+      "lastErrorAt": "2026-07-30T12:06:00.000Z"
+    }
+  },
+  "journal": {
+    "earliestSequence": 1,
+    "latestSequence": 6,
+    "retainedSegments": 1,
+    "quarantinedTailCount": 0
+  },
+  "links": {
+    "repository": "https://github.com/owner/repo",
+    "issue": "https://github.com/owner/repo/issues/42"
+  }
+}

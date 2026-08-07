@@ -38,6 +38,12 @@ export type StatusReadResult =
       available: false;
       reason: "not-found" | "corrupt";
       message: string;
+    }
+  | {
+      available: false;
+      reason: "unsupported-version";
+      receivedVersion: string;
+      message: string;
     };
 
 export function statusSnapshotPath(stateDir: string): string {

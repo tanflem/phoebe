@@ -7,6 +7,17 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vite-plus/test";
 import { STATUS_SNAPSHOT_FILE } from "./status-store.ts";
+
+const fixtureRoot = join(import.meta.dirname, "..", "contracts", "fixtures", "status-v2");
+
+/** Copy a published status-v2 corpus fixture in as one tenant's live snapshot. */
+function installFixtureSnapshot(stateDir: string, name: string): void {
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, STATUS_SNAPSHOT_FILE),
+    readFileSync(join(fixtureRoot, `${name}.json`)),
+  );
+}
 import {
   addRepo,
   defaultRepoUrl,
@@ -213,16 +224,36 @@ describe("listTenants", () => {
     expect(gadget).toMatchObject({ envPresent: false, retainedData: false });
   });
 
-  test("reads status.json when present", async () => {
+  test("reads the status-v2 contract snapshot when present", async () => {
+    addRepo({ configDir, slug: "acme/widget" });
+    const stateDir = join(dataBase, "acme", "widget", "state");
+    installFixtureSnapshot(stateDir, "running");
+    const [widget] = await listTenants({ configDir, dataBase });
+    expect(widget?.status).toMatchObject({
+      available: true,
+      status: {
+        lifecycle: { state: "running" },
+        activeWork: { kind: "issues", issueNumber: 42 },
+      },
+    });
+  });
+
+  test("reduces a version-mismatched snapshot to an available:false result carrying the received version", async () => {
     addRepo({ configDir, slug: "acme/widget" });
     const stateDir = join(dataBase, "acme", "widget", "state");
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(
-      join(stateDir, "status.json"),
-      JSON.stringify({ tenant: "acme/widget", currentUnit: { kind: "issues", id: "5" } }),
+      join(stateDir, STATUS_SNAPSHOT_FILE),
+      JSON.stringify({ ...MINIMAL_STATUS_V2, schemaVersion: "status-v3" }),
     );
     const [widget] = await listTenants({ configDir, dataBase });
-    expect(widget?.status?.currentUnit).toEqual({ kind: "issues", id: "5" });
+    expect(widget).toMatchObject({ configValid: true, envPresent: false, retainedData: true });
+    expect(widget?.status).toEqual({
+      available: false,
+      reason: "unsupported-version",
+      receivedVersion: "status-v3",
+      message: expect.stringContaining("status-v3"),
+    });
   });
 
   test("empty when there is no repos/ dir", async () => {
@@ -245,11 +276,7 @@ describe("listTenants", () => {
     writeFileSync(join(configDir, "broken", "phoebe.config.ts"), "export default {};\n");
     writeFileSync(join(configDir, "valid", ".env"), "GH_TOKEN=x\n");
     const stateDir = join(dataBase, "acme", "valid", "state");
-    mkdirSync(stateDir, { recursive: true });
-    writeFileSync(
-      join(stateDir, "status.json"),
-      JSON.stringify({ tenant: "acme/valid", currentUnit: { kind: "issues", id: "9" } }),
-    );
+    installFixtureSnapshot(stateDir, "running");
 
     const listings = await listTenants({
       configDir,
@@ -269,15 +296,15 @@ describe("listTenants", () => {
       envPresent: true,
       retainedData: true,
     });
-    expect(listings.find((l) => l.slug === "acme/valid")?.status?.currentUnit).toEqual({
-      kind: "issues",
-      id: "9",
+    expect(listings.find((l) => l.slug === "acme/valid")?.status).toMatchObject({
+      available: true,
+      status: { lifecycle: { state: "running" }, activeWork: { kind: "issues", issueNumber: 42 } },
     });
     expect(listings.find((l) => l.slug === "acme/envless")).toMatchObject({
       configValid: true,
       envPresent: false,
       retainedData: false,
-      status: null,
+      status: { available: false, reason: "not-found" },
     });
     expect(listings.find((l) => l.slug === "broken")).toMatchObject({
       configValid: false,

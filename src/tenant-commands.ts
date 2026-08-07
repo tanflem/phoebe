@@ -9,8 +9,9 @@
 //                              /data/repos/<slug> is retained, #62).
 // In-container (act on the data volume):
 //   - `list`   enumerate tenants + health (config valid? env present? engine
-//              state from status.json? retained /data?). Nested scans `repos/`;
-//              workspace mode reuses the #91 discover walk over child trees.
+//              state from the status-v2 contract snapshot? retained /data?).
+//              Nested scans `repos/`; workspace mode reuses the #91 discover
+//              walk over child trees.
 //   - `purge <owner/repo> --yes`  destructive wipe of a *removed* tenant's
 //              retained /data/repos/<slug>; refuses while a live config exists.
 //
@@ -37,8 +38,7 @@ import {
 import { readWorkspaceField } from "../bootstrap/workspace-source.ts";
 import { loadUserConfig } from "./load-config.ts";
 import { ContractCapabilityError, type QueueEntry } from "./status-contract.ts";
-import { readStatusSnapshot } from "./status-store.ts";
-import { readStatus, STATUS_FILE, type StatusSnapshot } from "./unit-event.ts";
+import { readStatusSnapshot, type StatusReadResult } from "./status-store.ts";
 
 /**
  * The named model-A constraint (#61/#63): all tenants share uid 10001, so their
@@ -260,7 +260,8 @@ export type TenantListing = {
   configValid: boolean;
   envPresent: boolean;
   retainedData: boolean;
-  status: StatusSnapshot | null;
+  /** null only when no slug resolved (hold dirs) — otherwise the read result. */
+  status: StatusReadResult | null;
   /** The status-v2 `queue` lookahead, or `[]` when no contract snapshot is readable yet. */
   queue: readonly QueueEntry[];
 };
@@ -271,17 +272,24 @@ function envPresent(dir: string): boolean {
 }
 
 /**
- * Read the status-v2 contract snapshot's `queue` for one tenant's state dir.
- * Tolerant by design — a missing/corrupt snapshot or a stale pre-v2 one (from
- * before an engine upgrade) must not break `phoebe list`, so this reduces every
- * failure mode to an empty lookahead rather than surfacing it.
+ * Read the status-v2 contract snapshot for one tenant's state dir. A version
+ * mismatch (a fleet mid-upgrade) is thrown by `readStatusSnapshot`, not
+ * returned — reduce it here to an `available: false` result carrying the
+ * received version, so `phoebe list` can tell it apart from a tenant that
+ * never booted instead of silently reporting "no status" for both.
  */
-function readTenantQueue(stateDir: string): readonly QueueEntry[] {
+function readTenantStatus(stateDir: string): StatusReadResult {
   try {
-    const result = readStatusSnapshot(stateDir);
-    return result.available ? result.status.queue : [];
+    return readStatusSnapshot(stateDir);
   } catch (error) {
-    if (error instanceof ContractCapabilityError) return [];
+    if (error instanceof ContractCapabilityError) {
+      return {
+        available: false,
+        reason: "unsupported-version",
+        receivedVersion: error.receivedVersion,
+        message: error.message,
+      };
+    }
     throw error;
   }
 }
@@ -295,13 +303,14 @@ function listingFor(
 ): TenantListing {
   const dataDir = join(dataBase, slug);
   const stateDir = join(dataDir, "state");
+  const status = readTenantStatus(stateDir);
   return {
     slug,
     configValid,
     envPresent: envPresent(dir),
     retainedData: existsSync(dataDir),
-    status: readStatus(join(stateDir, STATUS_FILE)),
-    queue: readTenantQueue(stateDir),
+    status,
+    queue: status.available ? status.status.queue : [],
   };
 }
 

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "status-v2",
+  "updatedAt": "2026-07-30T12:05:00.000Z",
+  "runtime": {
+    "runtimeId": "runtime-1",
+    "instanceId": "instance-1",
+    "startedAt": "2026-07-30T11:00:00.000Z"
+  },
+  "repository": {
+    "slug": "owner/repo",
+    "url": "https://github.com/owner/repo",
+    "defaultBranch": "main"
+  },
+  "digests": {
+    "engine": "sha256:engine",
+    "bootstrap": "sha256:bootstrap",
+    "config": "sha256:config",
+    "policy": "sha256:policy",
+    "prompts": "sha256:prompts",
+    "providerModel": "sha256:provider-model"
+  },
+  "capabilities": ["status-v2", "events-v1", "events-replay-v1", "events-range-v1"],
+  "lifecycle": { "state": "stopped", "reason": "Drain completed; runtime stopped." },
+  "activeWork": null,
+  "queue": [],
+  "lastSuccess": {
+    "eventId": "event-4",
+    "sequence": 4,
+    "workId": "reviews:9",
+    "outcome": "success",
+    "endedAt": "2026-07-30T12:04:30.000Z"
+  },
+  "lastFailure": null,
+  "control": {
+    "retry": { "attempt": 0 },
+    "backoff": { "active": false },
+    "quarantine": { "active": false },
+    "drain": { "requested": true, "requestedAt": "2026-07-30T12:03:00.000Z" }
+  },
+  "health": {
+    "state": "healthy",
+    "telemetry": { "writable": true, "lastError": null, "lastErrorAt": null }
+  },
+  "journal": {
+    "earliestSequence": 1,
+    "latestSequence": 4,
+    "retainedSegments": 1,
+    "quarantinedTailCount": 0
+  },
+  "links": { "repository": "https://github.com/owner/repo" }
+}

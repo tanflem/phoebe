@@ -43,6 +43,8 @@ describe("published compatibility fixtures", () => {
     "crash-loop-fallback",
     "queue-linear-chain",
     "queue-diamond",
+    "stopped",
+    "failed",
   ])("status-v2/%s.json conforms to the runtime reader", (name) => {
     const fixture = json(`contracts/fixtures/status-v2/${name}.json`);
     expect(validateStatus(fixture), JSON.stringify(validateStatus.errors)).toBe(true);

@@ -31,6 +31,18 @@ export type WorkIdentity = {
   startedAt: string;
 };
 
+const PR_KEYED_WORK_KINDS: ReadonlySet<WorkKind> = new Set(["conflicts", "checks", "reviews"]);
+
+/**
+ * The `#<id>` a `WorkIdentity` is known by: `pullRequestNumber` for the
+ * PR-keyed kinds (conflicts/checks/reviews), `issueNumber` for the
+ * issue-keyed kinds (issues/research) — the same rule `unitRef` (main.ts)
+ * applies to a picked `WorkUnit` before it becomes a `WorkIdentity`.
+ */
+export function workIdentityId(work: WorkIdentity): number | undefined {
+  return PR_KEYED_WORK_KINDS.has(work.kind) ? work.pullRequestNumber : work.issueNumber;
+}
+
 /**
  * One issue in the resolved work-order lookahead, ordered as Phoebe would take
  * it. `blockedBy` is the full resolved blocker set (body + native, per
