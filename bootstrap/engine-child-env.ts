@@ -51,6 +51,7 @@ export const ENGINE_CHILD_DEPLOYMENT_KNOBS = [
   "PHOEBE_BASE",
   "PHOEBE_AGENT",
   "PHOEBE_MODEL",
+  "PHOEBE_BASE_CONFIG",
 ] as const;
 
 /**
@@ -82,20 +83,29 @@ export function parseDotenv(contents: string): Record<string, string> {
 /**
  * Build a scrubbed, tenant-only env for one engine child. Deny-by-default: start
  * empty, copy the allowlisted base + deployment knobs from `base` (the
- * supervisor's `process.env`), then overlay tenant T's parsed `.env`. Because
- * `base`'s `GH_TOKEN` is not on either allowlist, the only `GH_TOKEN` a child
- * can hold is its own tenant's — the deployment clone credential never leaks.
+ * supervisor's `process.env`), overlay `extraEnv` — this launch's engine
+ * provenance and resolved-config snapshot (boot.ts's `engineProvenanceEnv`),
+ * the same per-launch values the flat spawn path passes — then overlay tenant
+ * T's parsed `.env` last. Because `base`'s `GH_TOKEN` is not on either
+ * allowlist, the only `GH_TOKEN` a child can hold is its own tenant's — the
+ * deployment clone credential never leaks.
  */
 export function buildEngineChildEnv(opts: {
   base: Record<string, string | undefined>;
   tenantEnv: Record<string, string>;
+  extraEnv?: Record<string, string>;
 }): Record<string, string> {
-  const { base, tenantEnv } = opts;
+  const { base, tenantEnv, extraEnv } = opts;
   const env: Record<string, string> = {};
   for (const key of [...ENGINE_CHILD_BASE_KEYS, ...ENGINE_CHILD_DEPLOYMENT_KNOBS]) {
     const value = base[key];
     if (value !== undefined && value !== "") {
       env[key] = value;
+    }
+  }
+  if (extraEnv) {
+    for (const [key, value] of Object.entries(extraEnv)) {
+      if (value !== "") env[key] = value;
     }
   }
   // Tenant secrets last: they are the tenant's own, and win over any collision.

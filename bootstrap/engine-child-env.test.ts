@@ -87,4 +87,23 @@ describe("buildEngineChildEnv", () => {
     expect(env.PATH).toBe("/bin");
     expect("HOME" in env).toBe(false);
   });
+
+  test("passes the generated base config path through (#38)", () => {
+    const env = buildEngineChildEnv({
+      base: { ...base, PHOEBE_BASE_CONFIG: "/etc/phoebe/generated-base.json" },
+      tenantEnv: {},
+    });
+    expect(env.PHOEBE_BASE_CONFIG).toBe("/etc/phoebe/generated-base.json");
+  });
+
+  test("overlays extraEnv (per-launch provenance/snapshot) between the base allowlist and tenant secrets (#38)", () => {
+    const env = buildEngineChildEnv({
+      base,
+      tenantEnv: { GH_TOKEN: "TENANT_TOKEN" },
+      extraEnv: { PHOEBE_RUNNING_ENGINE_SOURCE: "github", GH_TOKEN: "SHOULD_NOT_WIN" },
+    });
+    expect(env.PHOEBE_RUNNING_ENGINE_SOURCE).toBe("github");
+    // Tenant secrets still win over extraEnv on a collision.
+    expect(env.GH_TOKEN).toBe("TENANT_TOKEN");
+  });
 });

@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
 import {
   assertBaseConfigProtocol,
+  engineProvenanceEnv,
   isMovingBranch,
   loadBootConfiguration,
   LOCAL_ENGINE_DIR,
@@ -17,6 +18,8 @@ import {
   resolveEngineEntry,
   setupGitCredentials,
 } from "./boot.ts";
+import { BOOTSTRAP_RESOLVED_CONFIG_ENV } from "../src/config-resolution.ts";
+import { buildEngineChildEnv } from "./engine-child-env.ts";
 import { deploymentConfigFingerprint } from "./reconcile.ts";
 import { derivePaths } from "../src/paths.ts";
 
@@ -155,6 +158,56 @@ describe("observerEngineEnv", () => {
         }
       ).version,
     });
+  });
+});
+
+describe("engineProvenanceEnv", () => {
+  test("carries the resolved-config snapshot alongside engine provenance", () => {
+    const env = engineProvenanceEnv({
+      source: { source: "github", repo: "JesusFilm/phoebe", ref: "main" },
+      sha: "last-good-sha",
+      quarantinedSha: null,
+      resolvedConfiguration: '{"schemaVersion":1}',
+    });
+    expect(env[BOOTSTRAP_RESOLVED_CONFIG_ENV]).toBe('{"schemaVersion":1}');
+    expect(env.PHOEBE_RUNNING_ENGINE_SOURCE).toBe("github");
+  });
+
+  test("omits the snapshot key when no resolved configuration was produced", () => {
+    const env = engineProvenanceEnv({ sha: null, quarantinedSha: null });
+    expect(BOOTSTRAP_RESOLVED_CONFIG_ENV in env).toBe(false);
+  });
+});
+
+// A nested-fleet child (spawnFleetChild) must receive the same
+// deployment-critical vars as a flat-spawned child (spawnSupervised) for the
+// same launch: engine provenance, the atomic resolved-config snapshot, and the
+// generated base config (#38). Both spawn paths build their env from
+// `engineProvenanceEnv`, so this pins that they cannot drift apart again.
+describe("flat vs nested child-env parity (#38)", () => {
+  test("a nested tenant's child env carries the same provenance + snapshot as the flat path's", () => {
+    const engine = {
+      source: { source: "github", repo: "JesusFilm/phoebe", ref: "main" } as const,
+      sha: "abc123",
+      quarantinedSha: null,
+      resolvedConfiguration: '{"schemaVersion":1,"config":{}}',
+    };
+
+    // Flat path: spawnSupervised's env is exactly `engineProvenanceEnv(engine)`.
+    const flatEnv = engineProvenanceEnv(engine);
+
+    // Nested path: spawnFleetChild's tenant-scrubbed env for the same launch.
+    const nestedEnv = buildEngineChildEnv({
+      base: { PATH: "/usr/bin", PHOEBE_BASE_CONFIG: "/etc/phoebe/generated-base.json" },
+      tenantEnv: { GH_TOKEN: "TENANT_TOKEN" },
+      extraEnv: engineProvenanceEnv(engine),
+    });
+
+    for (const [key, value] of Object.entries(flatEnv)) {
+      expect(nestedEnv[key]).toBe(value);
+    }
+    // The generated base config also reaches a nested child.
+    expect(nestedEnv.PHOEBE_BASE_CONFIG).toBe("/etc/phoebe/generated-base.json");
   });
 });
 

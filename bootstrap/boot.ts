@@ -385,23 +385,39 @@ export function observerEngineEnv(engine: {
   };
 }
 
+/**
+ * The per-launch deployment-critical env every spawned engine child must get,
+ * flat or nested alike: engine provenance (`observerEngineEnv`) plus the
+ * atomic resolved-config snapshot (`BOOTSTRAP_RESOLVED_CONFIG_ENV`) so a child
+ * consumes the launch snapshot instead of re-reading mutable config files
+ * (#38). One function so the flat (`spawnSupervised`) and nested
+ * (`spawnFleetChild`) spawn paths cannot drift apart on these vars again.
+ */
+export function engineProvenanceEnv(engine: {
+  source?: ResolvedEngineSource;
+  sha: string | null;
+  quarantinedSha: string | null;
+  resolvedConfiguration?: string;
+}): Record<string, string> {
+  return {
+    ...(engine.resolvedConfiguration === undefined
+      ? {}
+      : { [BOOTSTRAP_RESOLVED_CONFIG_ENV]: engine.resolvedConfiguration }),
+    ...observerEngineEnv(engine),
+  };
+}
+
 function spawnSupervised(
   entry: string,
   argv: readonly string[],
-  resolvedConfiguration: string | undefined,
-  observerEnv: Record<string, string>,
+  provenanceEnv: Record<string, string>,
 ): SupervisedChild {
   let settle!: (exit: EngineExit) => void;
   const exited = new Promise<EngineExit>((resolve) => {
     settle = resolve;
   });
   const child = spawnEngine(entry, argv, {
-    env: {
-      ...(resolvedConfiguration === undefined
-        ? {}
-        : { [BOOTSTRAP_RESOLVED_CONFIG_ENV]: resolvedConfiguration }),
-      ...observerEnv,
-    },
+    env: provenanceEnv,
     onExit: (code: number | null, signal: NodeJS.Signals | null) => settle({ code, signal }),
     onSpawnError: (error: Error) => {
       console.error(`[phoebe] boot: engine failed to spawn — ${error.message}`);
@@ -468,6 +484,7 @@ function runFleet(opts: {
     const env = buildEngineChildEnv({
       base: process.env,
       tenantEnv: readTenantEnv(tenant.envPath),
+      extraEnv: engineProvenanceEnv(engine),
     });
     let settle!: (exit: EngineExit) => void;
     const exited = new Promise<EngineExit>((resolve) => {
@@ -728,8 +745,7 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
   try {
     exit = await superviseEngine({
       launch: () => launchTarget(configPath, guard),
-      spawn: (entry, engine) =>
-        spawnSupervised(entry, argv, engine.resolvedConfiguration, observerEngineEnv(engine)),
+      spawn: (entry, engine) => spawnSupervised(entry, argv, engineProvenanceEnv(engine)),
       stop,
       intervalMs,
       drainTimeoutMs: reconcileDrainTimeoutMs(),
