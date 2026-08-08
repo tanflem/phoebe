@@ -12,14 +12,23 @@ import { describe, expect, test } from "vite-plus/test";
 
 const srcDir = join(import.meta.dirname, ".");
 
-// `cli.ts` and `init.ts` are operator-invoked admin commands (add-repo,
-// remove-repo, list, purge, phoebe init) whose output is read directly in a
-// terminal, not collected off the per-tenant container stdout stream this
-// invariant governs — `list` in particular reports on every tenant at once, so
-// no single slug applies. The bootstrapper (`bootstrap/`, a separate component
-// per AGENTS.md) has its own fleet-wide `[phoebe] boot: ...` log lane and is
-// out of scope for this engine-only invariant.
-const EXEMPT_FILES = new Set(["cli.ts", "init.ts"]);
+// `cli.ts`, `init.ts`, and the `src/commands/` modules for add-repo,
+// remove-repo, list, purge, and serve are operator-invoked admin commands
+// whose output is read directly in a terminal, not collected off the
+// per-tenant container stdout stream this invariant governs — `list` in
+// particular reports on every tenant at once, so no single slug applies. The
+// bootstrapper (`bootstrap/`, a separate component per AGENTS.md) has its own
+// fleet-wide `[phoebe] boot: ...` log lane and is out of scope for this
+// engine-only invariant.
+const EXEMPT_FILES = new Set([
+  "cli.ts",
+  "init.ts",
+  "add-repo.ts",
+  "remove-repo.ts",
+  "list.ts",
+  "purge.ts",
+  "serve.ts",
+]);
 
 function walkSourceFiles(dir: string): string[] {
   const files: string[] = [];

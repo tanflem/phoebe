@@ -54,49 +54,7 @@ const NEXT_STEPS = `  cd container
   docker compose --env-file ../.env up -d
 `;
 
-export const SETUP_HELP_TEXT = `phoebe setup — interactive one-stop setup wizard
-
-Usage:
-  phoebe setup [dir]
-
-Scaffolds the consumer runtime (everything \`phoebe init\` writes), then walks you
-through a short Q&A and writes a complete phoebe.config.ts and a filled .env into
-[dir] (default: current directory). Pick your AI provider, drop in your tokens,
-and go straight to \`docker compose build\`.
-
-Requires an interactive terminal. For non-interactive scaffolding with
-placeholder values, use \`phoebe init\` instead.
-`;
-
 // --- Pure helpers -----------------------------------------------------------
-
-export type ParsedSetupArgs = { targetDir: string; help: boolean };
-
-/**
- * Parse argv left after the leading `setup` token. Mirrors `phoebe init`:
- * an optional positional target directory plus `--help`; unknown flags and a
- * second positional are rejected loudly.
- */
-export function parseSetupArgs(argv: readonly string[]): ParsedSetupArgs {
-  let targetDir: string | undefined;
-  let help = false;
-  for (const arg of argv) {
-    if (arg === "--help" || arg === "-h") {
-      help = true;
-      continue;
-    }
-    if (arg.startsWith("-")) {
-      throw new Error(`Unknown flag \`${arg}\` for \`phoebe setup\`. See \`phoebe setup --help\`.`);
-    }
-    if (targetDir !== undefined) {
-      throw new Error(
-        `\`phoebe setup\` takes at most one target directory (got \`${targetDir}\` and \`${arg}\`).`,
-      );
-    }
-    targetDir = arg;
-  }
-  return { targetDir: targetDir ?? ".", help };
-}
 
 export type GitRemote = { repoSlug: string; repoUrl: string };
 

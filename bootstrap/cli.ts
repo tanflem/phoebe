@@ -16,14 +16,35 @@
 // drains and respawns in place. Every other invocation delegates to the engine
 // CLI's `runCli` — scaffold via `init`, otherwise run the engine directly.
 
+import type { CliContext } from "../src/cli.ts";
 import { runCli } from "../src/cli.ts";
 import { runBoot } from "./boot.ts";
 
 const argv = process.argv.slice(2);
-const command = argv[0] === "boot" ? runBoot(argv.slice(1)) : runCli();
 
-command.catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`[phoebe] ${message}`);
-  process.exit(1);
-});
+if (argv[0] === "boot") {
+  runBoot(argv.slice(1)).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[phoebe] ${message}`);
+    process.exit(1);
+  });
+} else {
+  const ctx: CliContext = {
+    cwd: process.cwd(),
+    env: process.env,
+    stdout: process.stdout,
+    stderr: process.stderr,
+  };
+  runCli(argv, ctx).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (error: unknown) => {
+      // `runCli` reports every command error itself and never rejects; this
+      // is only a backstop against a truly unexpected failure.
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[phoebe] ${message}`);
+      process.exitCode = 1;
+    },
+  );
+}
