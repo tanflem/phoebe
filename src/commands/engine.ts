@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { REPOS_DIR } from "../../bootstrap/tenants.ts";
 import type { ArgSpec } from "../arg-spec.ts";
 import { parseArgs } from "../arg-spec.ts";
+import type { CliContext } from "../cli-context.ts";
 import {
   BOOTSTRAP_RESOLVED_CONFIG_ENV,
   parseResolvedConfigurationSnapshot,
@@ -114,7 +115,13 @@ export function loadEngineConfiguration(
 // one-liner plus engine-mode options) — this is what `phoebe --help` with no
 // subcommand has always shown, so it lives here rather than being duplicated
 // in commands/index.ts.
-export const HELP_TEXT = `phoebe — AFK coding agent
+//
+// `buildHelpText` splits that usage block around the named-commands list so
+// the bootstrapper (#75) can splice `boot`'s one-liner in without duplicating
+// the rest of the text — `boot` is composed onto the table from outside
+// `src/`, so `src/` itself never lists it (a standalone `node src/cli.ts` has
+// no `boot`).
+const HELP_HEADER = `phoebe — AFK coding agent
 
 Usage:
   phoebe setup [dir]               Interactive wizard: scaffold + fill config & .env
@@ -129,7 +136,9 @@ Usage:
     [--state-dir DIR]...
   phoebe config resolve --json     Print the canonical effective configuration
   phoebe status --json             Read the local status-v2 projection
-  phoebe [--config <path>] [flags] Run the engine
+`;
+
+const HELP_FOOTER = `  phoebe [--config <path>] [flags] Run the engine
 
 Options (engine mode):
   --config, -c <path>   Path to phoebe.config.ts (default: ./phoebe.config.ts)
@@ -152,30 +161,51 @@ Runtime toggles (read directly by the engine, not overlaid onto the config):
   PHOEBE_POLL_INTERVAL_MS Persistent-mode poll interval (default 300000)
 `;
 
+/**
+ * Build the root usage text, optionally splicing extra named-command
+ * one-liners (each already newline-terminated) in just before the engine's
+ * own unnamed-default line. With no argument this is byte-for-byte the
+ * `phoebe --help` text the engine table alone has always shown.
+ */
+export function buildHelpText(extraCommandLines = ""): string {
+  return HELP_HEADER + extraCommandLines + HELP_FOOTER;
+}
+
+export const HELP_TEXT = buildHelpText();
+
+/** Engine-mode run body, parametrized on which root usage `--help` prints —
+ *  the table's own default (`HELP_TEXT`) or the bootstrapper's extended text
+ *  (`buildHelpText` plus `boot`'s line, #75). */
+export async function runEngineMode(
+  argv: readonly string[],
+  ctx: CliContext,
+  helpText: string,
+): Promise<number> {
+  const parsed = parseCliArgs(argv);
+  if (parsed.help) {
+    ctx.stdout.write(helpText);
+    return 0;
+  }
+
+  const { slug: repoSlug, forward } = extractRepoFlag(parsed.forward);
+  const dataBase = resolveDataBase(ctx.env);
+  const configPath =
+    ctx.env[BOOTSTRAP_RESOLVED_CONFIG_ENV] === undefined
+      ? resolveEngineConfigPath(parsed.configPath, repoSlug, ctx.cwd)
+      : (parsed.configPath ?? "phoebe.config.ts");
+  const resolved = await loadEngineConfiguration(configPath, ctx.env, dataBase);
+  setResolvedConfig(resolved.config);
+
+  // Import after the config is installed — main.ts's module-level constants
+  // read `config` at import time via the Proxy in resolved-config.ts.
+  const { runEngine } = await import("../main.ts");
+  await runEngine(forward);
+  return 0;
+}
+
 export const engineCommand: Command = {
   name: "",
   summary: "phoebe [--config <path>] [flags] Run the engine",
   help: HELP_TEXT,
-  async run(argv, ctx) {
-    const parsed = parseCliArgs(argv);
-    if (parsed.help) {
-      ctx.stdout.write(HELP_TEXT);
-      return 0;
-    }
-
-    const { slug: repoSlug, forward } = extractRepoFlag(parsed.forward);
-    const dataBase = resolveDataBase(ctx.env);
-    const configPath =
-      ctx.env[BOOTSTRAP_RESOLVED_CONFIG_ENV] === undefined
-        ? resolveEngineConfigPath(parsed.configPath, repoSlug, ctx.cwd)
-        : (parsed.configPath ?? "phoebe.config.ts");
-    const resolved = await loadEngineConfiguration(configPath, ctx.env, dataBase);
-    setResolvedConfig(resolved.config);
-
-    // Import after the config is installed — main.ts's module-level constants
-    // read `config` at import time via the Proxy in resolved-config.ts.
-    const { runEngine } = await import("../main.ts");
-    await runEngine(forward);
-    return 0;
-  },
+  run: (argv, ctx) => runEngineMode(argv, ctx, HELP_TEXT),
 };

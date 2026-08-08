@@ -5,7 +5,7 @@
 
 import { addRepoCommand } from "./add-repo.ts";
 import { configResolveCommand } from "./config-resolve.ts";
-import { engineCommand, HELP_TEXT } from "./engine.ts";
+import { buildHelpText, engineCommand, HELP_TEXT, runEngineMode } from "./engine.ts";
 import { initCommand } from "./init.ts";
 import { listCommand } from "./list.ts";
 import { purgeCommand } from "./purge.ts";
@@ -31,6 +31,10 @@ export const COMMAND_TABLE: Readonly<Record<string, Command>> = {
 /** The table's unnamed entry — anything not matching a name above. */
 export const DEFAULT_COMMAND: Command = engineCommand;
 
-export { HELP_TEXT };
+// `buildHelpText`/`runEngineMode` let a caller extend the table with a
+// command `src/` cannot own (the dependency direction is one-way — engine
+// code never imports the bootstrapper) while still getting one composed
+// `--help` and one dispatch (`runCli`'s `extension` parameter, #75).
+export { HELP_TEXT, buildHelpText, runEngineMode };
 
 export type { Command } from "./types.ts";

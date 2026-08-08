@@ -17,11 +17,25 @@
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import type { CliContext } from "./cli-context.ts";
-import { COMMAND_TABLE, DEFAULT_COMMAND, HELP_TEXT } from "./commands/index.ts";
+import type { Command } from "./commands/index.ts";
+import { COMMAND_TABLE, DEFAULT_COMMAND, HELP_TEXT, runEngineMode } from "./commands/index.ts";
 
 export type { CliContext } from "./cli-context.ts";
 export { BOOTSTRAP_RESOLVED_CONFIG_ENV } from "./commands/engine.ts";
 export { HELP_TEXT };
+
+/**
+ * How a caller extends the table without `src/` ever knowing the extra
+ * command's own module — today only the bootstrapper's `boot` (#75), which
+ * must stay out of `src/`'s table (putting it there would mean `src/`
+ * importing `bootstrap/`, the wrong dependency direction). `helpText` is the
+ * *complete* replacement root usage (built with `buildHelpText`, ./commands/
+ * engine.ts) so `phoebe --help` lists the extra command too.
+ */
+export type CommandTableExtension = {
+  commands: Readonly<Record<string, Command>>;
+  helpText: string;
+};
 
 /**
  * Look `argv[0]` up in the command table and run it with the rest of argv.
@@ -29,16 +43,28 @@ export { HELP_TEXT };
  * to the default engine-mode entry, which gets the *full* argv — it does its
  * own `--config`/`--help` extraction and forwards the rest to the engine.
  *
+ * `extension` merges caller-supplied commands over the table for this call
+ * only (`COMMAND_TABLE` itself is never mutated) and swaps in its
+ * `helpText` for the unnamed default's `--help` output, so a table extended
+ * this way still gets exactly one dispatch and one complete `--help`.
+ *
  * Never rejects: a thrown `Error` from a command is reported to
  * `ctx.stderr` and turned into exit code 1, the same shape `phoebe`'s real
  * entry point below (and the bootstrapper's) has always reported it in.
  */
-export async function runCli(argv: readonly string[], ctx: CliContext): Promise<number> {
-  const command = argv.length > 0 ? COMMAND_TABLE[argv[0]!] : undefined;
+export async function runCli(
+  argv: readonly string[],
+  ctx: CliContext,
+  extension?: CommandTableExtension,
+): Promise<number> {
+  const table =
+    extension === undefined ? COMMAND_TABLE : { ...COMMAND_TABLE, ...extension.commands };
+  const command = argv.length > 0 ? table[argv[0]!] : undefined;
   try {
-    return command === undefined
+    if (command !== undefined) return await command.run(argv.slice(1), ctx);
+    return extension === undefined
       ? await DEFAULT_COMMAND.run(argv, ctx)
-      : await command.run(argv.slice(1), ctx);
+      : await runEngineMode(argv, ctx, extension.helpText);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     ctx.stderr.write(`[phoebe] ${message}\n`);
