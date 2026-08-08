@@ -3,34 +3,36 @@
 // in-package default prompts are repo-agnostic. They must not mention the
 // reference consumer (youtube-studio) or its dev toolchain (`vp`), and the
 // engine body must never repeat the resolved config's literal values — those
-// belong to the config layer (config-schema.ts + phoebe.config.ts), so every
-// call site reads them through `config.*` and retargeting Phoebe at another
-// repo remains an edit to one file.
+// belong to the config layer (src/config/ + phoebe.config.ts), so every call
+// site reads them through `config.*` and retargeting Phoebe at another repo
+// remains an edit to one file.
 
 import { readdirSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, sep } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
-import { CONFIG_DEFAULTS, PROVIDER_NAMES } from "./config-schema.ts";
+import { PROVIDER_NAMES } from "./config/index.ts";
 import { config } from "./resolved-config.ts";
 
 const srcDir = join(import.meta.dirname, ".");
+const configDir = join(srcDir, "config") + sep;
 const promptsDir = join(import.meta.dirname, "..", "prompts");
 
 // Files that legitimately define, resolve, load, or fixture the shipped
 // defaults. Excluded from the "engine body" that must not repeat config
-// literals — the config layer, the loader/env-overlay, and the test-time
-// installer all touch the config values by design. `init.ts` is the scaffolder:
-// its `DEFAULT_TEMPLATE_PARAMS` deliberately holds the generic placeholders
-// (`your-org/your-repo`) it renders into a starter config — the same
-// placeholders the repo-root sample config carries — so it, too, owns config
-// literals by design rather than reading them through `config.*`.
-const CONFIG_LAYER_FILES = new Set([
-  "config-schema.ts",
-  "resolved-config.ts",
-  "load-config.ts",
-  "test-setup.ts",
-  "init.ts",
-]);
+// literals — everything under src/config/ (the config layer proper), plus
+// three residual basenames: `resolved-config.ts` (the runtime holder,
+// installed by `config.*` readers), `test-setup.ts` (the test-time installer),
+// and `init.ts`, the scaffolder — its `DEFAULT_TEMPLATE_PARAMS` deliberately
+// holds the generic placeholders (`your-org/your-repo`) it renders into a
+// starter config, the same placeholders the repo-root sample config carries,
+// so it too owns config literals by design rather than reading them through
+// `config.*`. A new internal config file joins the layer automatically by
+// living under src/config/ — no second edit to a hardcoded list.
+const CONFIG_LAYER_BASENAMES = new Set(["resolved-config.ts", "test-setup.ts", "init.ts"]);
+
+function isConfigLayerFile(file: string): boolean {
+  return file.startsWith(configDir) || CONFIG_LAYER_BASENAMES.has(basename(file));
+}
 
 function walkSourceFiles(dir: string): string[] {
   const files: string[] = [];
@@ -46,7 +48,7 @@ function walkSourceFiles(dir: string): string[] {
 }
 
 function engineBodyFiles(): string[] {
-  return walkSourceFiles(srcDir).filter((file) => !CONFIG_LAYER_FILES.has(basename(file)));
+  return walkSourceFiles(srcDir).filter((file) => !isConfigLayerFile(file));
 }
 
 function defaultPromptFiles(): string[] {
@@ -112,10 +114,12 @@ describe("config seam", () => {
     }
   });
 
-  test("engine defaults include every field the config layer knows about", () => {
-    // Sanity: catch a new PhoebeConfig field being added without a default —
-    // `resolveConfig` would then leave it undefined at runtime.
-    for (const key of Object.keys(CONFIG_DEFAULTS)) {
+  test("resolved config leaves no field undefined", () => {
+    // Sanity: the roster (src/config/roster.ts) is total over `PhoebeUserConfig`
+    // by construction — TypeScript rejects a field added there without a
+    // matching roster entry — but this still catches `resolveConfig`'s
+    // hand-written `??` ladder skipping a field it should have filled.
+    for (const key of Object.keys(config)) {
       expect(config[key as keyof typeof config]).toBeDefined();
     }
   });

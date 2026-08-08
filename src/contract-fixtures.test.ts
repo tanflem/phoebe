@@ -4,7 +4,7 @@ import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { WORK_KIND_NAMES } from "./config-schema.ts";
+import { WORK_KIND_NAMES } from "./config/index.ts";
 import { eventJournalDir, replayEventJournal } from "./event-journal.ts";
 import { parseStatusSnapshot, parseWorkOutcomeEvent, WORK_KINDS } from "./status-contract.ts";
 
@@ -125,7 +125,7 @@ describe("published compatibility fixtures", () => {
     };
     const sets = {
       "status-contract.ts's WorkKind": [...WORK_KINDS].sort(),
-      "config-schema.ts's WORK_KIND_NAMES": [...WORK_KIND_NAMES].sort(),
+      "config/types.ts's WORK_KIND_NAMES": [...WORK_KIND_NAMES].sort(),
       "status-v2.schema.json's activeWork.kind enum": [
         ...status.properties.activeWork.oneOf[1].properties.kind.enum,
       ].sort(),
@@ -139,7 +139,7 @@ describe("published compatibility fixtures", () => {
         set,
         `${label} lists ${JSON.stringify(set)} but ${firstLabel} lists ${JSON.stringify(firstSet)}. ` +
           "Adding a work kind requires a deliberate contract decision, not a rename: update " +
-          "status-contract.ts's WorkKind, config-schema.ts's WORK_KIND_NAMES, and both schemas' " +
+          "status-contract.ts's WorkKind, config/types.ts's WORK_KIND_NAMES, and both schemas' " +
           "kind enums together.",
       ).toEqual(firstSet);
     }

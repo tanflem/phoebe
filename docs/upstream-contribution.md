@@ -18,8 +18,10 @@ fork, never the other direction, so neither has reached upstream yet.
 ## Checklist from the issue
 
 **`stackMode` defaults to `banner` — confirmed, no work needed.**
-`CONFIG_DEFAULTS.stackMode` is `"banner"` (`src/config-schema.ts`), and
-`resolveStackedPrPlan`'s `banner` branch is explicitly documented as
+At the time of this investigation, `CONFIG_DEFAULTS.stackMode` was `"banner"`
+(`src/config-schema.ts`; since consolidated into the roster at
+`src/config/roster.ts` by #55), and `resolveStackedPrPlan`'s `banner` branch is
+explicitly documented as
 "today's behavior exactly." `blockerSource` defaults to `"body"` the same way.
 Both features are opt-in; an upstream consumer who never sets either field sees
 byte-for-byte the same behavior as today.

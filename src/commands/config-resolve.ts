@@ -5,8 +5,11 @@
 
 import type { ArgSpec } from "../arg-spec.ts";
 import { parseArgs } from "../arg-spec.ts";
-import { formatResolvedConfiguration, loadResolvedConfiguration } from "../config-resolution.ts";
-import { resolveConfigPath } from "../load-config.ts";
+import {
+  formatResolvedConfiguration,
+  loadConfiguration,
+  resolveConfigPath,
+} from "../config/index.ts";
 import type { Command } from "./types.ts";
 
 export type ParsedConfigResolveArgs = { configPath: string | undefined };
@@ -50,7 +53,8 @@ export async function runConfigResolve(
 ): Promise<string> {
   const parsed = parseConfigResolveArgs(argv);
   const configPath = resolveConfigPath(parsed.configPath, runtime.cwd ?? process.cwd());
-  const resolved = await loadResolvedConfiguration(configPath, {
+  const resolved = await loadConfiguration({
+    repositoryPath: configPath,
     env: runtime.env ?? process.env,
   });
   return formatResolvedConfiguration(resolved);

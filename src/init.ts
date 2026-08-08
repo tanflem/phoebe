@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TENANT_CONFIG_FILE, TENANT_ENV_FILE } from "../bootstrap/tenants.ts";
-import { CONFIG_DEFAULTS } from "./config-schema.ts";
+import { resolveConfiguration } from "./config/index.ts";
 import { defaultGit, type GitRunner } from "./git-model.ts";
 import {
   defaultRepoUrl,
@@ -53,6 +53,22 @@ export type TemplateParams = {
   cliBin: string;
 };
 
+// A throwaway resolution of the roster's shipped defaults (src/config/) — the
+// wizard/scaffolder want the resolved defaults, not the (unexported) defaults
+// table itself. The five repository-identity fields are never read back out;
+// only the defaulted fields below (`defaultProvider`, `defaultModels`,
+// `providerEnv`, `promptFiles`) are. Exported so `phoebe setup` (setup.ts)
+// shares the same one resolution instead of running its own.
+export const DEFAULT_RESOLVED_CONFIG = resolveConfiguration({
+  repository: {
+    repoSlug: "placeholder/placeholder",
+    repoUrl: "https://example.invalid/placeholder.git",
+    installCommand: "placeholder",
+    checkCommand: "placeholder",
+    testCommand: "placeholder",
+  },
+}).config;
+
 // The four repo/toolchain values default to the same generic placeholders the
 // template hardcoded before they were tokenized, and `defaultProvider` to the
 // engine's own default — so `phoebe init` renders a config identical in effect
@@ -64,7 +80,7 @@ export const DEFAULT_TEMPLATE_PARAMS: TemplateParams = {
   installCommand: "npm ci",
   checkCommand: "npm run check",
   testCommand: "npm test",
-  defaultProvider: CONFIG_DEFAULTS.defaultProvider,
+  defaultProvider: DEFAULT_RESOLVED_CONFIG.defaultProvider,
   cliBin: "phoebe-agent",
 };
 
@@ -117,8 +133,8 @@ function planContainerOutputs(): PlannedOutput[] {
 
 /**
  * Enumerate every file init will produce for a profile. Flat prompts are
- * derived from `CONFIG_DEFAULTS.promptFiles` so adding a new prompt kind to
- * the engine automatically gets scaffolded — no drift between the two lists.
+ * derived from the roster's `promptFiles` default so adding a new prompt kind
+ * to the engine automatically gets scaffolded — no drift between the two lists.
  *
  * Tenant profile (`init --tenant`) is handled by {@link initTenant} — origin
  * prefill makes the config dynamic, so it is not part of this static plan.
@@ -156,7 +172,7 @@ export function planInitOutputs(profile: InitProfile = "flat"): PlannedOutput[] 
   }
 
   // flat — today's single-tenant deployment scaffold
-  const promptOutputs: PlannedOutput[] = Object.values(CONFIG_DEFAULTS.promptFiles).map(
+  const promptOutputs: PlannedOutput[] = Object.values(DEFAULT_RESOLVED_CONFIG.promptFiles).map(
     (relPath) => ({
       destRelPath: relPath,
       source: { kind: "shipped-prompt", promptRelPath: relPath },
@@ -520,7 +536,7 @@ export function copyShippedPromptsInto(
   const moduleDir = opts.moduleDir ?? dirname(fileURLToPath(import.meta.url));
   mkdirSync(promptsDir, { recursive: true });
   const written: string[] = [];
-  for (const relPath of Object.values(CONFIG_DEFAULTS.promptFiles)) {
+  for (const relPath of Object.values(DEFAULT_RESOLVED_CONFIG.promptFiles)) {
     const content = readShippedFile(relPath, opts.packageRoot, moduleDir);
     const dest = join(promptsDir, basename(relPath));
     writeFileSync(dest, content);

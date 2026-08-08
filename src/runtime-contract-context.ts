@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import type { PhoebeConfig, ProviderName } from "./config-schema.ts";
+import type { PhoebeConfig, ProviderName } from "./config/index.ts";
 import { digestValue, type DigestSet, type WorkOutcomeEvent } from "./status-contract.ts";
 
 export type RuntimeContractContext = {

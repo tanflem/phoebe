@@ -2,9 +2,9 @@
 //
 // Mirrors `engine-source.ts`: the presence of `workspace: { depth? }` on the
 // deployment-root config is what selects workspace discovery mode. The user-
-// facing type lives on `PhoebeUserConfig` (`WorkspaceField` in config-schema);
-// the engine never reads this field — `resolveConfig` drops it the same way
-// `engine` is dropped (#97). Malformed values fail loudly here when the
+// facing type lives on `PhoebeUserConfig` (`WorkspaceField` in src/config/);
+// the engine never reads this field — `resolveConfiguration` drops it the same
+// way `engine` is dropped (#97). Malformed values fail loudly here when the
 // bootstrapper loads the root config as an untyped record before the engine
 // validates via `validateUserConfig`.
 

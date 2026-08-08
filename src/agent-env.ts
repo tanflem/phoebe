@@ -3,7 +3,7 @@
 // the other providers' keys, so a prompt-injected agent can't exfiltrate the
 // whole keyring.
 
-import type { PhoebeConfig, ProviderName } from "./config-schema.ts";
+import type { PhoebeConfig, ProviderName } from "./config/index.ts";
 
 const BASE_ALLOWLIST = [
   "PATH",

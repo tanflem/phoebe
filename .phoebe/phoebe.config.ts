@@ -4,7 +4,7 @@
 // container mount with no reachable `node_modules`, so a value import could not
 // resolve under ESM. The scaffold's import resolves the published package; here
 // it resolves this repo's own source, since that is what the container runs.
-import type { PhoebeUserConfig } from "../src/config-schema.ts";
+import type { PhoebeUserConfig } from "../src/config/types.ts";
 
 const config: PhoebeUserConfig = {
   repoSlug: "tanflem/phoebe",
@@ -26,7 +26,7 @@ const config: PhoebeUserConfig = {
   // Run the engine from the host working tree mounted at /opt/phoebe-engine
   // (container/compose.yml) rather than a github checkout, so `boot` execs
   // exactly what is checked out. Only the bootstrapper reads this field; the
-  // engine drops it in resolveConfig.
+  // engine drops it in resolveConfiguration.
   engine: { source: "local" },
 };
 

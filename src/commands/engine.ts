@@ -20,11 +20,11 @@ import { parseArgs } from "../arg-spec.ts";
 import type { CliContext } from "../cli-context.ts";
 import {
   BOOTSTRAP_RESOLVED_CONFIG_ENV,
+  loadConfiguration,
   parseResolvedConfigurationSnapshot,
-  loadResolvedConfiguration,
+  resolveConfigPath,
   type ResolvedConfiguration,
-} from "../config-resolution.ts";
-import { resolveConfigPath } from "../load-config.ts";
+} from "../config/index.ts";
 import { resolveDataBase } from "../paths.ts";
 import { setResolvedConfig } from "../resolved-config.ts";
 import { isNested, parseSlug } from "../tenant-commands.ts";
@@ -107,7 +107,7 @@ export function loadEngineConfiguration(
 ): Promise<ResolvedConfiguration> {
   const snapshot = env[BOOTSTRAP_RESOLVED_CONFIG_ENV];
   return snapshot === undefined
-    ? loadResolvedConfiguration(configPath, { env, dataBase })
+    ? loadConfiguration({ repositoryPath: configPath, env, dataBase })
     : Promise.resolve(parseResolvedConfigurationSnapshot(snapshot, { dataBase }));
 }
 
@@ -148,10 +148,11 @@ Options (engine mode):
 
 Environment overlays (each replaces the corresponding config field):
   PHOEBE_REPO_SLUG, PHOEBE_REPO_URL, PHOEBE_DEFAULT_BRANCH, PHOEBE_BRANCH_PREFIX,
-  PHOEBE_READY_LABEL, PHOEBE_PROCESSING_LABEL, PHOEBE_PR_OPT_OUT_LABEL,
+  PHOEBE_READY_LABEL, PHOEBE_RESEARCH_LABEL, PHOEBE_PROCESSING_LABEL, PHOEBE_PR_OPT_OUT_LABEL,
   PHOEBE_INSTALL_COMMAND, PHOEBE_CHECK_COMMAND, PHOEBE_TEST_COMMAND,
   PHOEBE_READY_COMMAND, PHOEBE_BLOCKED_BY_PATTERN, PHOEBE_REVIEWS_SUCCESS_HEADING,
-  PHOEBE_PR_SCOPE, PHOEBE_DRAFT_PRS, PHOEBE_DEFAULT_PROVIDER
+  PHOEBE_PR_SCOPE, PHOEBE_PR_BASE_SCOPE, PHOEBE_DRAFT_PRS, PHOEBE_BLOCKER_SOURCE,
+  PHOEBE_STACK_MODE, PHOEBE_DEFAULT_PROVIDER
 
 Runtime toggles (read directly by the engine, not overlaid onto the config):
   PHOEBE_BASE_CONFIG     Absolute path to a versioned generated base config

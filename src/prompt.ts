@@ -12,7 +12,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import type { PhoebeConfig } from "./config-schema.ts";
+import type { PhoebeConfig } from "./config/index.ts";
 
 export type PromptArgs = Record<string, string>;
 

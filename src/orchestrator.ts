@@ -2,7 +2,7 @@
 // Kept separate from main.ts so it can be unit-tested without Docker/gh.
 
 import { asBranchRef, asSha, type BranchRef, type PrNumber, type Sha } from "./branded.ts";
-import type { BlockerSource, StackMode, WorkKindName } from "./config-schema.ts";
+import type { BlockerSource, StackMode, WorkKindName } from "./config/index.ts";
 import { config } from "./resolved-config.ts";
 import {
   PHOEBE_QUARANTINE_LABEL,
@@ -18,7 +18,7 @@ export {
   type BlockerSource,
   type StackMode,
   type WorkKindName,
-} from "./config-schema.ts";
+} from "./config/index.ts";
 
 /** Native blocker issue numbers keyed by the blocked issue's number. */
 export type NativeBlockerMap = ReadonlyMap<number, readonly number[]>;

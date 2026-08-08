@@ -22,4 +22,4 @@ export type {
   PromptFilesConfig,
   ProviderName,
   WorkspaceField,
-} from "../src/config-schema.ts";
+} from "../src/config/types.ts";

@@ -29,7 +29,7 @@
 import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseDotenv } from "../src/dotenv.ts";
-import { loadUserConfig, resolveConfigPath } from "../src/load-config.ts";
+import { loadUserConfig, resolveConfigPath } from "../src/config/index.ts";
 import { attachBroker, type BrokerChild } from "./broker-ipc.ts";
 import { createBootCrashGuard, engineProvenanceEnv, launchTarget } from "./boot.ts";
 import { readConfigDir } from "./config-dir.ts";

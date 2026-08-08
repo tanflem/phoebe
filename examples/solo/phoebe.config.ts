@@ -6,7 +6,7 @@
 //     never a relative `../src/...` path. That is exactly what a real consumer
 //     writes; in-tree it still resolves because tsc honors this package's own
 //     `name` + `exports` self-reference, so these examples type-check against the
-//     live schema (src/config-schema.ts) and can't silently rot.
+//     live schema (src/config/types.ts) and can't silently rot.
 //   • Keep the import TYPE-ONLY (`import type`) and annotate the object
 //     (`const config: PhoebeUserConfig`). A value import of `phoebe-agent` cannot
 //     resolve from the container mount, so a real config must never rely on one —

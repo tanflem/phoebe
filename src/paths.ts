@@ -21,7 +21,7 @@
 // `/data/<slug>`) keeps any tenant slug from ever colliding with `engine`.
 
 import { join } from "node:path";
-import type { PathsConfig } from "./config-schema.ts";
+import type { PathsConfig } from "./config/types.ts";
 
 /** Container base for all tenant data; the `phoebe-data` volume mounts here (#62). */
 export const DEFAULT_DATA_BASE = "/data/repos";

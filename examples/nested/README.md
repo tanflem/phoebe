@@ -59,7 +59,7 @@ here. So the committed tree stays tiny: config + secrets templates, nothing else
 These configs are a **reference illustration**, not a runnable fixture. The
 `acme/widget` + `acme/gadget` naming is fictional and shared across all three
 examples so they read as one progression. Every config type-checks against the
-live schema (`src/config-schema.ts`) as part of the repo's `typecheck` — if the
+live schema (`src/config/types.ts`) as part of the repo's `typecheck` — if the
 schema changes underneath, this example fails CI rather than silently rotting.
 
 ## Learn more

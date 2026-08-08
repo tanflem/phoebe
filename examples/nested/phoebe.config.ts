@@ -16,7 +16,7 @@
 // Convention (issue #115), same as every example: type-only import from the
 // published `phoebe-agent` specifier — never a relative `../src/...` path. It
 // still type-checks in-tree via this package's own `name` + `exports`
-// self-reference, so the example can't silently rot against src/config-schema.ts.
+// self-reference, so the example can't silently rot against src/config/types.ts.
 
 import type { PhoebeUserConfig } from "phoebe-agent";
 

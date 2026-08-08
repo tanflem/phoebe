@@ -1,17 +1,12 @@
-// Shape of the repo-specific configuration the Phoebe engine runs against.
-// The values live in ../phoebe.config.ts — the single file allowed to mention
-// this repository. Engine modules (everything under src/) import the resolved
-// config from ./resolved-config.ts and stay repo-agnostic;
-// src/config-seam.test.ts enforces it.
+// Hand-written config types: the shape of `phoebe.config.ts` (`PhoebeUserConfig`)
+// and the fully-resolved shape the engine runs against (`PhoebeConfig`), plus the
+// small supporting types and enum consts every layer of the config seam shares.
 //
-// Two shapes live here. `PhoebeUserConfig` is what a consumer writes: only the
-// unavoidable repo/toolchain fields are required; everything else is optional
-// and filled from `CONFIG_DEFAULTS` by `resolveConfig()`. `PhoebeConfig` is the
-// fully-resolved shape the engine sees at runtime — every field populated.
+// These types are not derived from the roster (./roster.ts) — the roster is
+// checked *against* them (`Record<keyof PhoebeUserConfig, FieldDescriptor>`),
+// so adding a field here without describing it in the roster is a compile error.
 
 import { isAbsolute } from "node:path";
-
-import { derivePaths } from "./paths.ts";
 
 export const PROVIDER_NAMES = ["cursor", "claude", "codex"] as const;
 export type ProviderName = (typeof PROVIDER_NAMES)[number];
@@ -63,7 +58,8 @@ export type StackMode = (typeof STACK_MODES)[number];
  * engine repo) or a local mount. The engine itself never reads this: it is a
  * bootstrapper concern, resolved by `bootstrap/engine-source.ts`. It lives on
  * `PhoebeUserConfig` only so a consumer config that sets it still type-checks,
- * and `resolveConfig` deliberately drops it — it never reaches `PhoebeConfig`.
+ * and `resolveConfiguration` deliberately drops it — it never reaches
+ * `PhoebeConfig`.
  */
 export type EngineSourceField =
   | { source: "github"; ref?: string; repo?: string }
@@ -125,7 +121,7 @@ export type IssueSourceConfig = {
  * many directory levels under the root the bootstrapper scans for tenant
  * configs (integer ≥ 1, default 1). The engine never reads this: it lives on
  * `PhoebeUserConfig` so a consumer config that sets it still type-checks, and
- * `resolveConfig` deliberately drops it — it never reaches `PhoebeConfig`.
+ * `resolveConfiguration` deliberately drops it — it never reaches `PhoebeConfig`.
  */
 export type WorkspaceField = {
   /** Scan depth under the workspace root; omit ⇒ 1. */
@@ -260,7 +256,8 @@ export type PhoebeConfig = {
   leaseTtlMs: number;
   /**
    * Per-tenant filesystem layout. Not user-supplied: derived from `repoSlug`
-   * and the deployment data base by `resolveConfig` (see src/paths.ts, #58/#62).
+   * and the deployment data base by `resolveConfiguration` (see src/paths.ts,
+   * #58/#62).
    */
   paths: PathsConfig;
 };
@@ -268,10 +265,11 @@ export type PhoebeConfig = {
 /**
  * User-facing shape of `phoebe.config.ts`. Only the five fields with no sane
  * cross-repo default are required; everything else is optional and filled from
- * `CONFIG_DEFAULTS` by `resolveConfig()`. Nested objects (`promptFiles`,
- * `defaultModels`, `providerEnv`) are merged key-by-key, so overriding one
- * provider's model or one prompt file does not force the caller to supply the
- * rest. `paths` is *not* here: it is derived from `repoSlug` (src/paths.ts).
+ * the roster's defaults (./roster.ts) by `resolveConfiguration()`. Nested
+ * objects (`promptFiles`, `defaultModels`, `providerEnv`) are merged
+ * key-by-key, so overriding one provider's model or one prompt file does not
+ * force the caller to supply the rest. `paths` is *not* here: it is derived
+ * from `repoSlug` (src/paths.ts).
  */
 export type PhoebeUserConfig = {
   repoSlug: string;
@@ -280,14 +278,14 @@ export type PhoebeUserConfig = {
   checkCommand: string;
   testCommand: string;
   /** Bootstrapper-only engine source (see {@link EngineSourceField}). The
-   *  engine ignores it; `resolveConfig` drops it. Omitted ⇒ github/main. */
+   *  engine ignores it; `resolveConfiguration` drops it. Omitted ⇒ github/main. */
   engine?: EngineSourceField;
   /**
    * Bootstrapper-only workspace discovery (see {@link WorkspaceField}).
    * Presence of this block selects workspace discovery mode (#83/#91); `depth`
    * is how many directory levels under the root to scan for child configs
-   * (default 1 when omitted). The engine never reads it; `resolveConfig` drops
-   * it the same way it drops `engine`.
+   * (default 1 when omitted). The engine never reads it; `resolveConfiguration`
+   * drops it the same way it drops `engine`.
    */
   workspace?: WorkspaceField;
   /**
@@ -303,7 +301,7 @@ export type PhoebeUserConfig = {
    * `promptFiles` resolve there), while still loading THIS config from `<dir>`.
    * The `phoebe.config.ts` itself must stay at `<dir>` — workspace discovery
    * skips dotfolders, so it cannot live inside `.phoebe/`. Must be a relative
-   * path with no `..`. The engine never reads it; `resolveConfig` drops it.
+   * path with no `..`. The engine never reads it; `resolveConfiguration` drops it.
    */
   configDir?: string;
   defaultBranch?: string;
@@ -338,58 +336,6 @@ export type PhoebeUserConfig = {
   leaseTtlMs?: number;
 };
 
-/**
- * Engine defaults for every optional user field. These land in the resolved
- * config whenever the consumer's `phoebe.config.ts` omits them, so a minimal
- * consumer config only has to name the repo and its three toolchain commands.
- */
-export const CONFIG_DEFAULTS = {
-  defaultBranch: "main",
-  branchPrefix: "phoebe/",
-  readyLabel: "ready-for-agent",
-  researchLabel: "wayfinder:research",
-  processingLabel: "processing",
-  prScope: "phoebe" as const,
-  prAuthors: [] as readonly string[],
-  prBaseScope: "default" as const,
-  draftPrs: "skip-non-phoebe" as const,
-  prOptOutLabel: "ready-for-human",
-  readyCommand: "npm run ready",
-  blockedByPattern: String.raw`Blocked by\s+#(\d+)`,
-  blockerSource: "body" as BlockerSource,
-  stackMode: "banner" as StackMode,
-  reviewsSuccessHeading: "## Review feedback addressed",
-  promptFiles: {
-    issue: "prompts/issues-prompt.md",
-    conflict: "prompts/conflict-prompt.md",
-    checks: "prompts/checks-prompt.md",
-    reviews: "prompts/reviews-prompt.md",
-    research: "prompts/research-prompt.md",
-  } satisfies PromptFilesConfig,
-  workOrder: ["conflicts", "checks", "reviews", "issues", "research"] as readonly string[],
-  defaultProvider: "cursor" as ProviderName,
-  defaultModels: {
-    cursor: "composer-2.5",
-    claude: "claude-sonnet-4-6",
-    codex: "gpt-5.4-mini",
-  } satisfies Record<ProviderName, string>,
-  providerEnv: {
-    cursor: "CURSOR_API_KEY",
-    claude: "ANTHROPIC_API_KEY",
-    codex: "OPENAI_KEY",
-  } satisfies Record<ProviderName, string>,
-  // 45 min: comfortably fits install(≤10) + a long agent run + test(≤10) + push,
-  // so hitting it means "actually stuck", not "slow" (#72).
-  runTimeoutMs: 2_700_000,
-  // Matches the house number for consecutive-failures-before-escalation (#75).
-  maxUnitTimeouts: 3,
-  // Matches the house number for consecutive-no-commit-attempts (#25).
-  maxUnitAttempts: 3,
-  // Comfortably outlasts a single heartbeat interval miss (#15's heartbeat
-  // ticks every ttl/3) while still self-healing an orphaned claim promptly.
-  leaseTtlMs: 1_800_000,
-} as const;
-
 export const WORK_KIND_NAMES = ["conflicts", "checks", "reviews", "issues", "research"] as const;
 export type WorkKindName = (typeof WORK_KIND_NAMES)[number];
 
@@ -412,13 +358,74 @@ export function validateWorkOrder(order: readonly string[]): readonly WorkKindNa
   return validated;
 }
 
-const REQUIRED_USER_FIELDS = [
-  "repoSlug",
-  "repoUrl",
-  "installCommand",
-  "checkCommand",
-  "testCommand",
-] as const satisfies readonly (keyof PhoebeUserConfig)[];
+/**
+ * Reject a malformed bootstrapper-only `configDir`. It relocates a tenant's
+ * asset directory (`.env`, prompts) to a subdirectory of the config's own dir,
+ * so it must be a non-empty *relative* path that stays inside that dir — an
+ * absolute path or a `..` segment would point the supervisor at another
+ * tenant's (or the host's) secrets. Named so a mistyped consumer config fails
+ * loudly the same way `workspace`/`blockedByPattern` do, even though only the
+ * bootstrapper reads the value. Wired into the roster (./roster.ts) as
+ * `configDir`'s `validate`.
+ */
+export function validateConfigDir(value: unknown, location: string): void {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(
+      `${location} must be a non-empty relative path (got ${JSON.stringify(value)}).`,
+    );
+  }
+  if (isAbsolute(value)) {
+    throw new Error(
+      `${location} must be relative to the config's directory, not absolute ` +
+        `(got ${JSON.stringify(value)}).`,
+    );
+  }
+  if (value.split(/[/\\]/).some((segment) => segment === "..")) {
+    throw new Error(
+      `${location} must stay within the tenant directory — no ".." segments ` +
+        `(got ${JSON.stringify(value)}).`,
+    );
+  }
+}
+
+/**
+ * Reject a malformed bootstrapper-only `workspace` block. Presence is enough
+ * to select workspace mode later; `depth` must be an integer ≥ 1 when set, and
+ * omitted `depth` is fine (bootstrap defaults it to 1). Wired into the roster
+ * (./roster.ts) as `workspace`'s `validate`.
+ */
+export function validateWorkspaceField(value: unknown, location: string): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${location} must be { depth?: integer ≥ 1 } (got ${JSON.stringify(value)}).`);
+  }
+  const { depth } = value as WorkspaceField;
+  if (depth === undefined) return;
+  if (typeof depth !== "number" || !Number.isInteger(depth) || depth < 1) {
+    throw new Error(`${location}.depth must be an integer ≥ 1 (got ${JSON.stringify(depth)}).`);
+  }
+}
+
+/**
+ * Reject a malformed `issueSource` (#21): an object with a required non-empty
+ * `repoSlug`, an optional string `readyLabel`, and no other keys. Wired into
+ * the roster (./roster.ts) as `issueSource`'s `validate`.
+ */
+export function validateIssueSource(value: unknown, location: string): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${location} must be an object of the form { repoSlug, readyLabel? }.`);
+  }
+  const { repoSlug, readyLabel, ...rest } = value as Record<string, unknown>;
+  const unknownKeys = Object.keys(rest);
+  if (unknownKeys.length > 0) {
+    throw new Error(`${location} has unknown field(s): ${unknownKeys.join(", ")}.`);
+  }
+  if (typeof repoSlug !== "string" || repoSlug.trim().length === 0) {
+    throw new Error(`${location}.repoSlug must be a non-empty string.`);
+  }
+  if (readyLabel !== undefined && typeof readyLabel !== "string") {
+    throw new Error(`${location}.readyLabel must be a string.`);
+  }
+}
 
 /**
  * Count the numbered capture groups defined by a regex source. We compile it
@@ -440,176 +447,26 @@ function countCaptureGroups(source: string): number {
 }
 
 /**
- * Throw when a required field is missing or blank, or when `blockedByPattern`
- * is not a valid regex or fails to expose the blocker issue number as capture
- * group 1. `parseBlockedBy` reads `match[1]`, so a pattern without a capture
- * group would silently break the entire blocker-detection path — reject it up
- * front. Kept separate from `resolveConfig` so consumers or tests can validate
- * a config independent of the defaults merge.
+ * Reject a `blockedByPattern` that is not a valid regex, or one that is valid
+ * but does not expose the blocker issue number as capture group 1.
+ * `parseBlockedBy` reads `match[1]`, so a pattern without a capture group would
+ * silently break the entire blocker-detection path — reject it up front. Wired
+ * into the roster (./roster.ts) as `blockedByPattern`'s `validate`.
  */
-export function validateUserConfig(user: PhoebeUserConfig): void {
-  const missing = REQUIRED_USER_FIELDS.filter((key) => {
-    const value = user[key];
-    return typeof value !== "string" || value.trim().length === 0;
-  });
-  if (missing.length > 0) {
+export function validateBlockedByPattern(value: unknown, location: string): void {
+  if (typeof value !== "string") {
+    throw new Error(`${location} must be a string.`);
+  }
+  try {
+    new RegExp(value, "gi");
+  } catch (err) {
+    throw new Error(`${location} is not a valid regex: ${(err as Error).message}`);
+  }
+  if (countCaptureGroups(value) < 1) {
     throw new Error(
-      `phoebe.config.ts is missing required field(s): ${missing.join(", ")}. ` +
-        `Only these five fields are required — the engine fills the rest from its defaults.`,
+      `${location} must define capture group 1 for the blocker issue number ` +
+        `(parseBlockedBy reads match[1]). Wrap the number portion in parentheses, ` +
+        `e.g. String.raw\`Blocked by\\s+#(\\d+)\`.`,
     );
   }
-  if (user.blockedByPattern !== undefined) {
-    try {
-      new RegExp(user.blockedByPattern, "gi");
-    } catch (err) {
-      throw new Error(
-        `phoebe.config.ts blockedByPattern is not a valid regex: ${(err as Error).message}`,
-      );
-    }
-    if (countCaptureGroups(user.blockedByPattern) < 1) {
-      throw new Error(
-        `phoebe.config.ts blockedByPattern must define capture group 1 for the ` +
-          `blocker issue number (parseBlockedBy reads match[1]). Wrap the number ` +
-          `portion in parentheses, e.g. String.raw\`Blocked by\\s+#(\\d+)\`.`,
-      );
-    }
-  }
-  if (user.issueSource !== undefined) {
-    if (
-      user.issueSource === null ||
-      typeof user.issueSource !== "object" ||
-      Array.isArray(user.issueSource)
-    ) {
-      throw new Error(
-        `phoebe.config.ts issueSource must be an object of the form { repoSlug, readyLabel? }.`,
-      );
-    }
-    const { repoSlug, readyLabel, ...rest } = user.issueSource as Record<string, unknown>;
-    const unknownKeys = Object.keys(rest);
-    if (unknownKeys.length > 0) {
-      throw new Error(
-        `phoebe.config.ts issueSource has unknown field(s): ${unknownKeys.join(", ")}.`,
-      );
-    }
-    if (typeof repoSlug !== "string" || repoSlug.trim().length === 0) {
-      throw new Error(`phoebe.config.ts issueSource.repoSlug must be a non-empty string.`);
-    }
-    if (readyLabel !== undefined && typeof readyLabel !== "string") {
-      throw new Error(`phoebe.config.ts issueSource.readyLabel must be a string.`);
-    }
-  }
-  if (user.workspace !== undefined) {
-    validateWorkspaceField(user.workspace);
-  }
-  if (user.configDir !== undefined) {
-    validateConfigDir(user.configDir);
-  }
-}
-
-/**
- * Reject a malformed bootstrapper-only `configDir`. It relocates a tenant's
- * asset directory (`.env`, prompts) to a subdirectory of the config's own dir,
- * so it must be a non-empty *relative* path that stays inside that dir — an
- * absolute path or a `..` segment would point the supervisor at another
- * tenant's (or the host's) secrets. Validated here so a mistyped consumer
- * config fails at `resolveConfig` like `workspace`/`blockedByPattern` do, even
- * though only the bootstrapper reads the value.
- */
-function validateConfigDir(configDir: NonNullable<PhoebeUserConfig["configDir"]>): void {
-  if (typeof configDir !== "string" || configDir.trim().length === 0) {
-    throw new Error(
-      `phoebe.config.ts \`configDir\` must be a non-empty relative path ` +
-        `(got ${JSON.stringify(configDir)}).`,
-    );
-  }
-  if (isAbsolute(configDir)) {
-    throw new Error(
-      `phoebe.config.ts \`configDir\` must be relative to the config's directory, ` +
-        `not absolute (got ${JSON.stringify(configDir)}).`,
-    );
-  }
-  if (configDir.split(/[/\\]/).some((segment) => segment === "..")) {
-    throw new Error(
-      `phoebe.config.ts \`configDir\` must stay within the tenant directory — ` +
-        `no ".." segments (got ${JSON.stringify(configDir)}).`,
-    );
-  }
-}
-
-/**
- * Reject a malformed bootstrapper-only `workspace` block. Presence is enough
- * to select workspace mode later; `depth` must be an integer ≥ 1 when set, and
- * omitted `depth` is fine (bootstrap defaults it to 1). Kept on the schema so
- * a mistyped consumer config fails at `resolveConfig` the same way a bad
- * `blockedByPattern` does — before any engine work unit runs.
- */
-function validateWorkspaceField(field: WorkspaceField): void {
-  if (field === null || typeof field !== "object" || Array.isArray(field)) {
-    throw new Error(
-      `phoebe.config.ts \`workspace\` must be { depth?: integer ≥ 1 } ` +
-        `(got ${JSON.stringify(field)}).`,
-    );
-  }
-  if (field.depth === undefined) return;
-  const { depth } = field;
-  if (typeof depth !== "number" || !Number.isInteger(depth) || depth < 1) {
-    throw new Error(
-      `phoebe.config.ts \`workspace.depth\` must be an integer ≥ 1 ` +
-        `(got ${JSON.stringify(depth)}).`,
-    );
-  }
-}
-
-/**
- * Merge a user config with `CONFIG_DEFAULTS` and return the fully-populated
- * shape the engine runs against. Nested records are shallow-merged so partial
- * overrides (one prompt file, one provider's env var, etc.) work as expected.
- *
- * `paths` is *derived*, not merged: it comes from `repoSlug` and the deployment
- * data base (`opts.dataBase`, default `/data/repos`; the CLI threads
- * `PHOEBE_DATA_DIR` through — see src/paths.ts, #58/#62), so a tenant's on-disk
- * layout is a function of its slug and can never drift from it.
- */
-export function resolveConfig(
-  user: PhoebeUserConfig,
-  opts: { dataBase?: string } = {},
-): PhoebeConfig {
-  validateUserConfig(user);
-  const readyLabel = user.readyLabel ?? CONFIG_DEFAULTS.readyLabel;
-  return {
-    repoSlug: user.repoSlug,
-    repoUrl: user.repoUrl,
-    installCommand: user.installCommand,
-    checkCommand: user.checkCommand,
-    testCommand: user.testCommand,
-    defaultBranch: user.defaultBranch ?? CONFIG_DEFAULTS.defaultBranch,
-    branchPrefix: user.branchPrefix ?? CONFIG_DEFAULTS.branchPrefix,
-    readyLabel,
-    issueSource: {
-      repoSlug: user.issueSource?.repoSlug ?? user.repoSlug,
-      readyLabel: user.issueSource?.readyLabel ?? readyLabel,
-    },
-    researchLabel: user.researchLabel ?? CONFIG_DEFAULTS.researchLabel,
-    processingLabel: user.processingLabel ?? CONFIG_DEFAULTS.processingLabel,
-    prScope: user.prScope ?? CONFIG_DEFAULTS.prScope,
-    prAuthors: user.prAuthors ?? CONFIG_DEFAULTS.prAuthors,
-    prBaseScope: user.prBaseScope ?? CONFIG_DEFAULTS.prBaseScope,
-    draftPrs: user.draftPrs ?? CONFIG_DEFAULTS.draftPrs,
-    prOptOutLabel: user.prOptOutLabel ?? CONFIG_DEFAULTS.prOptOutLabel,
-    readyCommand: user.readyCommand ?? CONFIG_DEFAULTS.readyCommand,
-    blockedByPattern: user.blockedByPattern ?? CONFIG_DEFAULTS.blockedByPattern,
-    blockerSource: user.blockerSource ?? CONFIG_DEFAULTS.blockerSource,
-    stackMode: user.stackMode ?? CONFIG_DEFAULTS.stackMode,
-    reviewsSuccessHeading: user.reviewsSuccessHeading ?? CONFIG_DEFAULTS.reviewsSuccessHeading,
-    promptFiles: { ...CONFIG_DEFAULTS.promptFiles, ...user.promptFiles },
-    workOrder: user.workOrder ?? CONFIG_DEFAULTS.workOrder,
-    defaultProvider: user.defaultProvider ?? CONFIG_DEFAULTS.defaultProvider,
-    defaultModels: { ...CONFIG_DEFAULTS.defaultModels, ...user.defaultModels },
-    providerEnv: { ...CONFIG_DEFAULTS.providerEnv, ...user.providerEnv },
-    runTimeoutMs: user.runTimeoutMs ?? CONFIG_DEFAULTS.runTimeoutMs,
-    maxUnitTimeouts: user.maxUnitTimeouts ?? CONFIG_DEFAULTS.maxUnitTimeouts,
-    maxUnitAttempts: user.maxUnitAttempts ?? CONFIG_DEFAULTS.maxUnitAttempts,
-    leaseTtlMs: user.leaseTtlMs ?? CONFIG_DEFAULTS.leaseTtlMs,
-    paths: derivePaths(user.repoSlug, opts.dataBase),
-  };
 }

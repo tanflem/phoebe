@@ -12,7 +12,7 @@
 // authenticates with ANTHROPIC_API_KEY, the phoebe tenant with CURSOR_API_KEY,
 // and the supervisor's per-tenant env-scrub (#61) means neither child can ever
 // read the other's key at all.
-import type { PhoebeUserConfig } from "../../../../src/config-schema.ts";
+import type { PhoebeUserConfig } from "../../../../src/config/types.ts";
 
 const config: PhoebeUserConfig = {
   repoSlug: "JesusFilm/youtube-studio",

@@ -3,7 +3,7 @@
 // `workspace` fields.
 
 import { describe, expect, test } from "vite-plus/test";
-import type { PhoebeUserConfig } from "../src/config-schema.ts";
+import type { PhoebeUserConfig } from "../src/config/index.ts";
 import { defineConfig } from "./define-config.ts";
 
 describe("defineConfig", () => {

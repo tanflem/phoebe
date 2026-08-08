@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { resolveConfig } from "./config-schema.ts";
+import { resolveConfiguration } from "./config/index.ts";
 import { buildRuntimeContractContext } from "./runtime-contract-context.ts";
 
 const roots: string[] = [];
@@ -19,18 +19,20 @@ describe("runtime contract digests", () => {
     for (const name of ["issue", "conflict", "checks", "reviews", "research"]) {
       writeFileSync(join(root, "prompts", `${name}.md`), `${name} prompt super-secret\n`);
     }
-    const config = resolveConfig({
-      repoSlug: "owner/repo",
-      repoUrl: "https://github.com/owner/repo.git",
-      installCommand: "pnpm install",
-      checkCommand: "vp check",
-      testCommand: "vp test",
-      promptFiles: {
-        issue: "prompts/issue.md",
-        conflict: "prompts/conflict.md",
-        checks: "prompts/checks.md",
-        reviews: "prompts/reviews.md",
-        research: "prompts/research.md",
+    const { config } = resolveConfiguration({
+      repository: {
+        repoSlug: "owner/repo",
+        repoUrl: "https://github.com/owner/repo.git",
+        installCommand: "pnpm install",
+        checkCommand: "vp check",
+        testCommand: "vp test",
+        promptFiles: {
+          issue: "prompts/issue.md",
+          conflict: "prompts/conflict.md",
+          checks: "prompts/checks.md",
+          reviews: "prompts/reviews.md",
+          research: "prompts/research.md",
+        },
       },
     });
 

@@ -19,7 +19,7 @@
 
 import { execFileSync, execSync } from "node:child_process";
 import { config } from "./resolved-config.ts";
-import { PROVIDER_NAMES, type ProviderName } from "./config-schema.ts";
+import { PROVIDER_NAMES, type ProviderName } from "./config/index.ts";
 import {
   asBranchRef,
   asPrNumber,
