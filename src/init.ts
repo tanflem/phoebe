@@ -186,12 +186,20 @@ export function planInitOutputs(profile: InitProfile = "flat"): PlannedOutput[] 
  * in a consumer's repo. Iteration is over the params (not a regex over the
  * source) so a value that happens to contain a `{{…}}`-shaped substring is
  * never re-scanned.
+ *
+ * Every token in every shipped template sits inside a quoted string literal
+ * (a TS string, a Dockerfile `ARG ...="..."`, a YAML `"..."` scalar), so each
+ * value is escaped the same way `renderTenantConfig` escapes its fields:
+ * `JSON.stringify` minus its outer quotes. That neutralizes a `"`, `\`, or
+ * newline in a user-typed value (e.g. `phoebe setup` answers) that would
+ * otherwise break out of the surrounding literal (issue #71).
  */
 export function renderTemplate(source: string, params: TemplateParams): string {
   let rendered = source;
   for (const [key, value] of Object.entries(params) as Array<[keyof TemplateParams, string]>) {
     const token = `{{${keyToToken(key)}}}`;
-    rendered = rendered.split(token).join(value);
+    const escaped = JSON.stringify(value).slice(1, -1);
+    rendered = rendered.split(token).join(escaped);
   }
   const leftover = /\{\{([A-Z_]+)\}\}/.exec(rendered);
   if (leftover) {

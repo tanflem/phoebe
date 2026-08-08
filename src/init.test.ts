@@ -115,6 +115,23 @@ describe("renderTemplate", () => {
     const out = renderTemplate("{{CLI_BIN}} and {{CLI_BIN}}", DEFAULT_TEMPLATE_PARAMS);
     expect(out).toBe("phoebe-agent and phoebe-agent");
   });
+
+  test("escapes a double quote so it cannot break out of the surrounding string literal (#71)", () => {
+    const out = renderTemplate('installCommand: "{{INSTALL_COMMAND}}",', {
+      ...DEFAULT_TEMPLATE_PARAMS,
+      installCommand: 'pnpm i --filter "web"',
+    });
+    expect(out).toBe('installCommand: "pnpm i --filter \\"web\\"",');
+  });
+
+  test("escapes a backslash and a newline the same way (#71)", () => {
+    const out = renderTemplate("{{TEST_COMMAND}}", {
+      ...DEFAULT_TEMPLATE_PARAMS,
+      testCommand: 'echo "line1"\nline2\\end',
+    });
+    expect(out).toBe(JSON.stringify('echo "line1"\nline2\\end').slice(1, -1));
+    expect(out).not.toContain("\n");
+  });
 });
 
 describe("mergeGitignore", () => {
