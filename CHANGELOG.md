@@ -1,5 +1,43 @@
 # phoebe-agent
 
+## 0.4.0
+
+### Minor Changes
+
+- 786a7b7: Add `blockerSource` config field (`PHOEBE_BLOCKER_SOURCE` overlay). `"body"`
+  (default, unchanged behavior) parses `blockedByPattern` over the issue body
+  text; `"native"` reads GitHub's issue-dependencies API
+  (`repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by`) instead; `"both"`
+  unions and deduplicates the two.
+- 786a7b7: Add `stackMode` config field (`PHOEBE_STACK_MODE` overlay). `"banner"`
+  (default, unchanged behavior) keeps basing a blocked issue's PR on
+  `defaultBranch` with a ⛓️ "do not merge before the blocker" banner. `"native"`
+  instead opens the PR against the blocker's branch and registers it as a true
+  GitHub stacked PR via `gh stack link` (the `github/gh-stack` extension, installed
+  lazily on first boot under native mode). `"off"` never stacks, though a blocker
+  still gates the skip decision.
+- 302b93d: Bump the runtime status contract to `status-v2` and publish the resolved
+  `issues` work-order lookahead as `queue` — each eligible issue in selection
+  order with its fully resolved blocker set and whether it is workable this
+  cycle. `phoebe status --json` and `phoebe list` both surface it; a `status-v1`
+  reader gets an explicit `ContractCapabilityError` instead of a malformed parse.
+- f2fe590: Publish the local status-v1 snapshot, replayable events-v1 outcome journal,
+  schemas, compatibility fixtures, and `phoebe status --json`.
+- fae14fb: Add a versioned generated base configuration layer through
+  `PHOEBE_BASE_CONFIG`, shared bootstrapper/engine resolution, deterministic merge
+  and validation rules, graceful base-file reconciliation, and
+  `phoebe config resolve --json`.
+- cd60eb7: Add `phoebe setup`, an interactive one-stop wizard that scaffolds the consumer
+  runtime (like `phoebe init`) and then walks you through a short Q&A to write a
+  complete `phoebe.config.ts` and a filled `.env` — detecting the repo from your
+  git remote, picking the agent provider, and masking secret input — so you can go
+  straight to `docker compose build` with no hand-editing. `phoebe init` stays the
+  bare, non-interactive scaffolding primitive.
+
+### Patch Changes
+
+- f15ba9f: Allow PR janitors to target configured authors and stacked PR base branches.
+
 ## 0.3.0
 
 ### Minor Changes

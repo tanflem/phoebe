@@ -1,6 +1,6 @@
 {
   "name": "phoebe-agent",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": false,
   "description": "Phoebe — an AFK coding agent: a configurable engine that works a GitHub issue tracker one ticket at a time, distributed as a pinned CLI.",
   "homepage": "https://github.com/JesusFilm/phoebe#readme",
