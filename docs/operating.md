@@ -165,6 +165,7 @@ one trust domain.
 | Remove a repo                           | `phoebe remove-repo <owner/repo>` (host-side). Reversible — the tenant's `/data` is retained; re-adding re-uses it.                                            |
 | Reclaim a removed repo's disk           | `phoebe purge <owner/repo> --yes` (in-container). Destructive; refuses while a live config still exists.                                                       |
 | See every tenant + its health           | `phoebe list` (in-container): config present? `.env` present? retained data? current unit (read from each tenant's `status.json`).                             |
+| See every tenant across several containers, in a browser | `phoebe serve [--port N] [--state-dir DIR]...` — one read-only HTML page, one row per tenant (lifecycle, active work, last outcome, snapshot age) plus its queue lookahead. Binds to localhost only; reads snapshots fresh on every request, never writes. |
 
 **Concurrency across tenants.** Only `PHOEBE_MAX_CONCURRENT_AGENTS` work units
 (default **1**) execute at once across the whole fleet — a supervisor-brokered,

@@ -21,6 +21,7 @@
 // install pipeline and leaves the door open to CLI-only concerns (init/pin
 // scaffolding, log formatting) without breaking a library API.
 
+import { once } from "node:events";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -42,6 +43,7 @@ import {
 import { resolveConfigPath } from "./load-config.ts";
 import { resolveDataBase } from "./paths.ts";
 import { setResolvedConfig } from "./resolved-config.ts";
+import { DEFAULT_SERVE_HOST, parseServeArgs, SERVE_HELP_TEXT, startServeServer } from "./serve.ts";
 import { parseSetupArgs, runSetup, SETUP_HELP_TEXT } from "./setup.ts";
 import {
   ContractCapabilityError,
@@ -300,6 +302,8 @@ Usage:
   phoebe remove-repo <owner/repo>  Remove a tenant's config (data retained)
   phoebe list                      List tenants + health (in-container)
   phoebe purge <owner/repo> --yes  Wipe a removed tenant's data (in-container)
+  phoebe serve [--port N]          Serve a read-only fleet page (see --help)
+    [--state-dir DIR]...
   phoebe config resolve --json     Print the canonical effective configuration
   phoebe status --json             Read the local status-v2 projection
   phoebe [--config <path>] [flags] Run the engine
@@ -537,6 +541,27 @@ function runPurgeCli(argv: readonly string[]): void {
 }
 
 /**
+ * `phoebe serve [--port N] [--state-dir DIR]...` — a read-only HTML fleet
+ * view (#24). Starts an HTTP server and returns once it is listening; the
+ * open socket (not this promise) is what keeps the process alive.
+ */
+async function runServeCli(argv: readonly string[]): Promise<void> {
+  const parsed = parseServeArgs(argv);
+  if (parsed.help) {
+    process.stdout.write(SERVE_HELP_TEXT);
+    return;
+  }
+  const server = startServeServer({ port: parsed.port, stateDirs: parsed.stateDirs });
+  await once(server, "listening");
+  const address = server.address();
+  const port = address !== null && typeof address === "object" ? address.port : parsed.port;
+  process.stdout.write(
+    `[phoebe] serve listening on http://${DEFAULT_SERVE_HOST}:${port}/\n` +
+      `    state dirs: ${parsed.stateDirs.join(", ")}\n`,
+  );
+}
+
+/**
  * Engine-CLI entry point. Loads the consumer's config, overlays env, installs
  * the resolved config, then runs the engine (or scaffolds via `init`). The
  * bootstrapper (bootstrap/cli.ts) delegates here so the engine keeps a single
@@ -646,6 +671,7 @@ export async function runCli(): Promise<void> {
   if (args[0] === "remove-repo") return runRemoveRepoCli(args.slice(1));
   if (args[0] === "list") return await runListCli();
   if (args[0] === "purge") return runPurgeCli(args.slice(1));
+  if (args[0] === "serve") return await runServeCli(args.slice(1));
 
   const parsed = parseCliArgs(args);
   if (parsed.help) {

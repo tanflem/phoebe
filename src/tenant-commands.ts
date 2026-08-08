@@ -275,10 +275,11 @@ function envPresent(dir: string): boolean {
  * Read the status-v2 contract snapshot for one tenant's state dir. A version
  * mismatch (a fleet mid-upgrade) is thrown by `readStatusSnapshot`, not
  * returned — reduce it here to an `available: false` result carrying the
- * received version, so `phoebe list` can tell it apart from a tenant that
- * never booted instead of silently reporting "no status" for both.
+ * received version, so a consumer (`phoebe list`, `phoebe serve`, #24) can
+ * tell it apart from a tenant that never booted instead of silently
+ * reporting "no status" for both.
  */
-function readTenantStatus(stateDir: string): StatusReadResult {
+export function readTenantStatus(stateDir: string): StatusReadResult {
   try {
     return readStatusSnapshot(stateDir);
   } catch (error) {
