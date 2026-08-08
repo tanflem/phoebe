@@ -86,25 +86,18 @@ Create it at **Settings → Developer settings → Fine-grained tokens**:
 Set an expiry you can live with and rotate it into `.env` when it lapses. Store it
 only in `GH_TOKEN` (§5) — never commit it.
 
-## 3. Create the labels (engine defaults, verbatim)
+## 3. The labels (engine defaults, verbatim)
 
 Phoebe only ever picks up issues carrying `readyLabel` and only hands PRs back on
-`prOptOutLabel`; it applies `processingLabel` to claim an issue. Because the config
-leaves all three at their defaults, create them under the **exact default names**
-in `JesusFilm/core`:
+`prOptOutLabel`; it applies `processingLabel` to claim an issue, and
+`phoebe:quarantined` to a poison unit. Nothing to create by hand: the engine
+ensures every label it writes (`gh label create --force`) once at boot, so a
+fresh `JesusFilm/core` gets `ready-for-agent`, `processing`,
+`wayfinder:research`, `ready-for-human`, and `phoebe:quarantined` on first run.
 
-```bash
-gh label create ready-for-agent --repo JesusFilm/core \
-  --description "Phoebe may pick this issue up" --color 0E8A16
-gh label create processing --repo JesusFilm/core \
-  --description "Phoebe is working this issue" --color FBCA04
-gh label create ready-for-human --repo JesusFilm/core \
-  --description "Hand this PR back to a human — Phoebe skips it" --color D93F0B
-```
-
-Colors and descriptions are cosmetic; the **names must match** the config values.
-`gh label create` is idempotent-ish — if a label already exists it errors; add
-`--force` to overwrite, or skip it. See [`operating.md`](operating.md) for how a
+Only the **names** matter — if the config overrides a label away from its
+default, use the overridden name when applying it by hand (`readyLabel` on an
+issue, `prOptOutLabel` on a PR). See [`operating.md`](operating.md) for how a
 human then drives Phoebe with these labels.
 
 ## 4. Scaffold the runtime into a committed `phoebe/`

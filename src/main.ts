@@ -52,6 +52,7 @@ import {
   resolveMaxUnitAttempts,
   resolveMaxUnitTimeouts,
 } from "./quarantine.ts";
+import { ensureLabels, phoebeLabelSet } from "./ensure-labels.ts";
 import {
   EXECUTION_REFUSED_MESSAGE,
   executionDecision,
@@ -2516,6 +2517,11 @@ export async function runEngine(argv: readonly string[] = process.argv.slice(2))
     // discovery call hits it — a clearer boot failure than a bare gh error
     // mid-cycle.
     verifyIssueSourceAccess();
+    // #67: create every Phoebe-owned label before anything writes it. Once per
+    // process, not per write — `gh label create --force` is idempotent, so
+    // this is safe on every daemon restart, and it must land before
+    // `reclaimStaleClaims` below, which flips `processingLabel`/`readyLabel`.
+    ensureLabels(phoebeLabelSet(config), gh);
     // #15 startup self-recovery: a fresh process start is proof any claim this
     // persisted runtime id still holds is dead (it cannot still be mid-run),
     // so reclaim those unconditionally rather than waiting out the lease TTL.
