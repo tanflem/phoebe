@@ -1,12 +1,16 @@
-// Fleet supervision tests (#58/#59): one child per tenant, hot add/remove/change,
-// shared-engine relaunch-all, stop-drains-all, and per-tenant respawn of a child
-// that died on its own — all driven through injected fakes (scripted children, a
-// gated clock, a stop latch), no processes or real timers.
+// Fleet supervision tests (#58/#59, merged into the shared loop by #65): one
+// child per tenant, hot add/remove/change, shared-engine relaunch-all, stop-
+// drains-all, and per-tenant respawn of a child that died on its own — all
+// driven through injected fakes (scripted children, a gated clock, a stop
+// latch), no processes or real timers. This file drives `supervise` (the same
+// loop `supervise.test.ts` drives as flat's fleet-of-one) as a real,
+// multi-tenant fleet.
 
 import { describe, expect, test } from "vite-plus/test";
-import type { EngineExit, LaunchedEngine } from "./reconcile.ts";
+import { REF_CHANGE_DRAIN_SIGNAL } from "../src/drain.ts";
+import type { EngineExit, LaunchedEngine } from "./supervise.ts";
 import type { DiscoveredTenant, TenantSample } from "./tenants.ts";
-import { superviseFleet, type DrainTimer, type FleetChild } from "./supervise-fleet.ts";
+import { supervise, type DrainTimer, type SupervisedChild } from "./supervise.ts";
 
 function tenant(slug: string): DiscoveredTenant {
   return {
@@ -22,7 +26,7 @@ function sample(slug: string, fingerprint: string | null): TenantSample {
   return { tenant: tenant(slug), fingerprint };
 }
 
-function fakeChild(): { child: FleetChild; kills: string[]; exit: (e?: EngineExit) => void } {
+function fakeChild(): { child: SupervisedChild; kills: string[]; exit: (e?: EngineExit) => void } {
   const kills: string[] = [];
   let settle!: (e: EngineExit) => void;
   const exited = new Promise<EngineExit>((resolve) => {
@@ -45,7 +49,7 @@ function fakeChild(): { child: FleetChild; kills: string[]; exit: (e?: EngineExi
 
 // A child that ignores SIGTERM — its work unit never finishes — so `exited`
 // only settles once it is SIGKILLed. Exercises the drain escalation (#79).
-function stubbornChild(): { child: FleetChild; kills: string[] } {
+function stubbornChild(): { child: SupervisedChild; kills: string[] } {
   const kills: string[] = [];
   let settle!: (e: EngineExit) => void;
   const exited = new Promise<EngineExit>((resolve) => {
@@ -125,23 +129,28 @@ function harness(initial: TenantSample[]) {
     sample: () => ({ config: engineState.config, remoteSha: engineState.remoteSha }),
   });
 
-  const result = superviseFleet({
+  const result = supervise<DiscoveredTenant>({
     intervalMs: 1000,
-    crashBackoffMs: 500,
+    childRespawnBackoffMs: 500,
     launch: () => {
       launches += 1;
       return engine();
     },
-    discover: () => {
-      if (throwOnDiscover) throw new Error("EACCES: repos/ momentarily unreadable");
-      return tenants;
+    children: {
+      discover: () => {
+        if (throwOnDiscover) throw new Error("EACCES: repos/ momentarily unreadable");
+        return tenants;
+      },
+      spawn: (t) => {
+        const fake = fakeChild();
+        spawned.push({ slug: t.slug, fake });
+        return fake.child;
+      },
     },
+    // A fleet child that dies on its own is always respawned, with backoff —
+    // the shared engine and every sibling are left untouched (#60 §6).
+    onChildGone: () => "respawn",
     onDiscoverError: (e) => discoverErrors.push(e),
-    spawn: (t) => {
-      const fake = fakeChild();
-      spawned.push({ slug: t.slug, fake });
-      return fake.child;
-    },
     stop: {
       get requested() {
         return stopRequested;
@@ -229,7 +238,10 @@ describe("superviseFleet", () => {
     h.moveEngineRef("b".repeat(40));
     h.tick();
     await settle();
-    for (const s of initial) expect(s.fake.kills).toContain("SIGTERM");
+    // A ref change gets the distinct drain signal on both topologies (#65), so
+    // a draining tenant can report why (#23) — the fleet no longer sends a
+    // plain SIGTERM for this.
+    for (const s of initial) expect(s.fake.kills).toContain(REF_CHANGE_DRAIN_SIGNAL);
     expect(h.launches).toBe(2); // re-materialized once
     expect(h.spawned).toHaveLength(4); // 2 initial + 2 respawned
   });
@@ -262,9 +274,9 @@ describe("superviseFleet", () => {
     const spawned: Array<{ slug: string | null; fake: ReturnType<typeof fakeChild> }> = [];
     let stopRequested = false;
 
-    const result = superviseFleet({
+    const result = supervise<DiscoveredTenant>({
       intervalMs: 1000,
-      crashBackoffMs: 500,
+      childRespawnBackoffMs: 500,
       launch: () => ({
         entry: "/data/engine/src/cli.ts",
         sha: engineState.remoteSha,
@@ -273,12 +285,15 @@ describe("superviseFleet", () => {
         guarded: true,
         sample: () => ({ config: engineState.config, remoteSha: engineState.remoteSha }),
       }),
-      discover: () => ({ samples, hold }),
-      spawn: (t) => {
-        const fake = fakeChild();
-        spawned.push({ slug: t.slug, fake });
-        return fake.child;
+      children: {
+        discover: () => ({ samples, hold }),
+        spawn: (t) => {
+          const fake = fakeChild();
+          spawned.push({ slug: t.slug, fake });
+          return fake.child;
+        },
       },
+      onChildGone: () => "respawn",
       stop: {
         get requested() {
           return stopRequested;
@@ -343,7 +358,7 @@ describe("superviseFleet", () => {
     const reaped: string[] = [];
     let stopRequested = false;
 
-    const result = superviseFleet({
+    const result = supervise<DiscoveredTenant>({
       intervalMs: 1000,
       drainTimer: timers.make,
       launch: () => ({
@@ -354,8 +369,11 @@ describe("superviseFleet", () => {
         guarded: true,
         sample: () => ({ config: "1:1", remoteSha: "a".repeat(40) }),
       }),
-      discover: () => [sample("acme/widget", "fp1")],
-      spawn: () => stubborn.child,
+      children: {
+        discover: () => [sample("acme/widget", "fp1")],
+        spawn: () => stubborn.child,
+      },
+      onChildGone: () => "respawn",
       onReap: (id) => reaped.push(id),
       stop: {
         get requested() {
@@ -389,7 +407,7 @@ describe("superviseFleet", () => {
     const spawned: Array<ReturnType<typeof fakeChild>> = [];
     let stopRequested = false;
 
-    const result = superviseFleet({
+    const result = supervise<DiscoveredTenant>({
       intervalMs: 1000,
       drainTimer: timers.make,
       launch: () => ({
@@ -400,12 +418,15 @@ describe("superviseFleet", () => {
         guarded: true,
         sample: () => ({ config: "1:1", remoteSha: "a".repeat(40) }),
       }),
-      discover: () => [sample("acme/widget", "fp1")],
-      spawn: () => {
-        const fake = fakeChild();
-        spawned.push(fake);
-        return fake.child;
+      children: {
+        discover: () => [sample("acme/widget", "fp1")],
+        spawn: () => {
+          const fake = fakeChild();
+          spawned.push(fake);
+          return fake.child;
+        },
       },
+      onChildGone: () => "respawn",
       stop: {
         get requested() {
           return stopRequested;

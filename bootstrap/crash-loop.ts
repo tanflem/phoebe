@@ -1,18 +1,18 @@
 // Crash-loop fallback for `phoebe boot` — the guard on a bad engine ref.
 //
-// The reconcile watch (reconcile.ts) will happily follow the tracked branch onto
-// any commit someone pushes, including one that dies on startup. Without a guard
-// that is an unattended container crash-looping on an unattended repo. So boot
-// keeps a small record of which engine commits actually *ran*: a SHA that dies
-// fast, repeatedly, is quarantined, and boot pins back to the last SHA that ran
-// healthily until the tracked branch moves past the bad one.
+// The supervision loop (supervise.ts) will happily follow the tracked branch
+// onto any commit someone pushes, including one that dies on startup. Without a
+// guard that is an unattended container crash-looping on an unattended repo. So
+// boot keeps a small record of which engine commits actually *ran*: a SHA that
+// dies fast, repeatedly, is quarantined, and boot pins back to the last SHA that
+// ran healthily until the tracked branch moves past the bad one.
 //
 // This module is that record and the decisions over it — pure folds plus a JSON
 // file — so the whole ladder (first crash → threshold → fallback → recovery) is
 // tested without spawning an engine. The wording an operator sees is the
 // module's too (`describeEvent` below); only the sink (`log`) is the caller's.
 // The wiring — when a run ends, what dir the record lives under — is boot.ts;
-// the loop that calls it is reconcile.ts.
+// the loop that calls it is supervise.ts.
 //
 // The record is deployment-global: one guard about one engine SHA for the whole
 // fleet (#60). It lives beside the shared engine checkout on the `phoebe-engine`
@@ -30,7 +30,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { EngineRun } from "./reconcile.ts";
+import type { EngineRun } from "./supervise.ts";
 
 /**
  * Consecutive fast crashes of one engine SHA before boot pins back to the
