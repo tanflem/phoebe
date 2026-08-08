@@ -20,7 +20,7 @@ import {
 } from "./boot.ts";
 import { BOOTSTRAP_RESOLVED_CONFIG_ENV } from "../src/config-resolution.ts";
 import { childEnv } from "./engine-child-env.ts";
-import { deploymentConfigFingerprint } from "./reconcile.ts";
+import { deploymentConfigFingerprint } from "./supervise.ts";
 import { derivePaths } from "../src/paths.ts";
 
 describe("resolveEngineEntry", () => {

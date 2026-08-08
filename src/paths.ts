@@ -6,7 +6,7 @@
 //   /data/repos/<owner>/<repo>/
 //       repo/         the private clone (origin hub)
 //       worktrees/    per-unit git worktrees
-//       state/        reserved per-tenant state (supervisor status.json, #73)
+//       state/        per-tenant state (status-v2.json, runtime-id, events-v1/)
 //
 // The base (`/data/repos`) is a deployment-global constant in the container;
 // `PHOEBE_DATA_DIR` overrides it for host/dev. Derivation is a pure function of

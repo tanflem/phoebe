@@ -71,12 +71,12 @@ mount model, SIGTERM draining, reconcile-in-place — matches the flat dogfood
 The four signals the multi-tenant work must demonstrate, and where each is
 proven:
 
-| Signal                                                                        | Proven by                                                                                  |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| **Per-tenant tagging (#73)** — `[phoebe:<slug>]` unit events + `status.json`  | A real run (far side of the GitHub boundary); unit-tested in `src/runtime-status.test.ts`. |
-| **Concurrency cap (#59)** — one broker serializes work across both tenants    | A real run; unit-tested in `bootstrap/slot-broker.test.ts` + `supervise-fleet.test.ts`.    |
-| **Per-tenant state (#62/#63)** — `state/<slug>/status.json` + `phoebe list`   | The boundary smoke (`phoebe list` enumerates both tenants).                                |
-| **Env-scrub isolation (#61)** — each child sees only its own tenant's secrets | Structural at spawn; unit-tested in `bootstrap/engine-child-env.test.ts`.                  |
+| Signal                                                                            | Proven by                                                                                  |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **Per-tenant tagging (#73)** — `[phoebe:<slug>]` unit events + status-v2 snapshot | A real run (far side of the GitHub boundary); unit-tested in `src/runtime-status.test.ts`. |
+| **Concurrency cap (#59)** — one broker serializes work across both tenants        | A real run; unit-tested in `bootstrap/slot-broker.test.ts` + `supervise-fleet.test.ts`.    |
+| **Per-tenant state (#62/#63)** — `state/<slug>/status-v2.json` + `phoebe list`    | The boundary smoke (`phoebe list` enumerates both tenants).                                |
+| **Env-scrub isolation (#61)** — each child sees only its own tenant's secrets     | Structural at spawn; unit-tested in `bootstrap/engine-child-env.test.ts`.                  |
 
 The **layout itself** — nested mode, exactly these two tenants, a shared local
 engine, no stray per-tenant engine field — is pinned by
@@ -146,7 +146,7 @@ reap. What still needs your secrets, on a first real run, is the **far side** of
 that boundary — and with it the two signals that only fire there:
 
 - a real work unit per tenant → the `[phoebe:<slug>]` unit-event tag +
-  `status.json` snapshot `phoebe list` then reads live (#73);
+  status-v2 snapshot `phoebe list` then reads live (#73);
 - both tenants contending for the single concurrency slot, so the broker is seen
   serializing real work rather than just starting (#59).
 

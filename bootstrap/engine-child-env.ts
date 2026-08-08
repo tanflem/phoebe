@@ -2,7 +2,7 @@
 //
 // `phoebe boot` spawns an engine child two ways: flat (one child, the
 // supervisor's own process) and nested/workspace (one child per tenant, from
-// `superviseFleet`). Both need the same deployment-critical vars — the base
+// `supervise`). Both need the same deployment-critical vars — the base
 // allowlist, the atomic launch snapshot, and engine provenance — and only ever
 // differ in *where the secrets come from*. Splitting the two spawn paths into
 // separate env-construction code is exactly how #38 happened: nested silently

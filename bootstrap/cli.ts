@@ -13,7 +13,7 @@
 // resolves the engine source (bootstrap/engine-source.ts) — a local mount or
 // a github checkout (bootstrap/github-engine.ts) — execs the engine as a
 // long-running child forwarding SIGTERM so the engine drains, and supervises it
-// with the reconcile watch (bootstrap/reconcile.ts): a config or ref change
+// with the reconcile watch (bootstrap/supervise.ts): a config or ref change
 // drains and respawns in place. Every other invocation goes through the same
 // `runCli` dispatch — scaffold via `init`, otherwise run the engine directly.
 //

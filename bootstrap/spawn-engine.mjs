@@ -40,7 +40,7 @@ export function propagateExit(code, signal) {
  *
  * `onExit` overrides dying with the child. `phoebe boot` passes one because it
  * *supervises* the engine: a child that exited because boot drained it for a
- * relaunch must not take the container with it (bootstrap/reconcile.ts). Callers
+ * relaunch must not take the container with it (bootstrap/supervise.ts). Callers
  * that pass `onExit` own the propagation — propagateExit is exported for them.
  */
 export function spawnEngine(entry, args, { env, onSpawnError, onExit } = {}) {
@@ -83,7 +83,7 @@ export function spawnEngine(entry, args, { env, onSpawnError, onExit } = {}) {
 }
 
 /**
- * Spawn one nested-mode tenant engine child (bootstrap/supervise-fleet.ts).
+ * Spawn one nested-mode tenant engine child (bootstrap/supervise.ts).
  * Differs from `spawnEngine` in two ways the fleet needs:
  *
  *   * An **IPC channel** (4th stdio slot), so the child's `createSlotClient`

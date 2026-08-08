@@ -218,6 +218,17 @@ the next poll (see [`configuration.md`](configuration.md) and
 [`operating.md`](operating.md)). Read [`trust.md`](trust.md) first — co-locating
 repos in one container means co-locating them in **one trust domain**.
 
+## `state/<slug>/status.json` is retired
+
+After this release, `state/<slug>/status.json` is neither written nor read —
+the status-v2 snapshot (`status-v2.json`) is the only projection Phoebe
+maintains. **No cleanup code ships.** Deleting a stale `status.json` on boot
+would be deletion code that runs against a user's state volume, is needed for
+exactly one release, and is dead weight forever after — a poor trade for a few
+hundred bytes. Its presence is a harmless marker of which engine version last
+wrote the tenant's state dir; remove it at leisure, or leave it, whichever you
+prefer.
+
 ## First install
 
 For the full, execute-top-to-bottom install runbook — prerequisites, secrets,

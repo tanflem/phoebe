@@ -18,7 +18,7 @@
 // reconcile-SIGTERM) the supervisor reclaims every slot it held, so no failure
 // mode can permanently shrink the cap (#59/#72 carry-forward). This module is
 // the pure semaphore + owner bookkeeping; the IPC adapter that maps child
-// messages onto it lives in the supervisor (bootstrap/reconcile.ts).
+// messages onto it lives in the supervisor (bootstrap/supervise.ts).
 
 /** Default concurrency cap: today's proven single-repo host load (#59). */
 export const DEFAULT_MAX_CONCURRENT = 1;

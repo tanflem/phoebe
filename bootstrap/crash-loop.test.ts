@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vite-plus/test";
 import { createCrashGuard, type CrashGuard } from "./crash-loop.ts";
-import type { EngineRun, LaunchedEngine } from "./reconcile.ts";
+import type { EngineRun, LaunchedEngine } from "./supervise.ts";
 
 /** The store shape `createCrashGuard` accepts — not exported, so derived structurally. */
 type CrashLoopStore = NonNullable<Parameters<typeof createCrashGuard>[0]["store"]>;

@@ -1,13 +1,16 @@
-// The reconcile watch loop (#42): while the engine runs, `phoebe boot` polls the
-// mounted config and the tracked ref, and on a change drains the engine
-// (SIGTERM) and relaunches it in the same container.
+// The supervision loop (#65, map #44): while the engine(s) run, `phoebe boot`
+// polls the mounted config and the tracked ref, and on a change drains (SIGTERM,
+// or the distinct ref-change signal) and relaunches — same container, no
+// interrupted work unit.
 //
 // Two seams are tested here. `detectChange` is the pure decision — "is the
 // running engine stale?" — comparing what is live now against what the running
-// engine was launched from. `superviseEngine` is the loop, driven through
-// injected fakes (a scripted child, a gated clock, a stop latch) so the
-// drain-then-relaunch ordering is asserted without spawning processes or
-// waiting on real timers.
+// engine was launched from. `supervise` is the loop, driven through injected
+// fakes (a scripted child, a gated clock, a stop latch) so the drain-then-
+// relaunch ordering is asserted without spawning processes or waiting on real
+// timers. This file drives it as flat does: a fleet of exactly one, constant
+// tenant — see `supervise-fleet.test.ts` for the same loop driven as a real,
+// multi-tenant fleet.
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,13 +21,14 @@ import {
   configFingerprint,
   deploymentConfigFingerprint,
   detectChange,
-  superviseEngine,
+  supervise,
+  type DrainTimer,
   type EngineExit,
   type EngineRun,
   type LaunchedEngine,
   type SupervisedChild,
   type WatchState,
-} from "./reconcile.ts";
+} from "./supervise.ts";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
@@ -189,7 +193,11 @@ describe("configFingerprint", () => {
   });
 });
 
-// --- superviseEngine --------------------------------------------------------
+// --- supervise, driven as flat: a fleet of one -----------------------------
+
+/** The one, constant tenant a flat deployment supervises (its id never changes). */
+type FlatTenant = { id: "flat" };
+const FLAT_TENANT: FlatTenant = { id: "flat" };
 
 /** A stand-in engine process whose exit the test controls. */
 function fakeChild(): {
@@ -233,13 +241,42 @@ function gatedClock(): { wait: () => Promise<void>; tick: () => void } {
   };
 }
 
+/**
+ * A gated cancelable timer standing in for the drain grace: nothing fires until
+ * `fire`, and a canceled timer stays quiet — so a test drives the escalation
+ * (mirrors supervise-fleet.test.ts's `gatedTimers`).
+ */
+function gatedDrainTimer(): { make: DrainTimer; fire: () => void } {
+  const pending: Array<{ resolve: () => void; canceled: boolean }> = [];
+  return {
+    make: (_ms: number) => {
+      const entry = { resolve: () => {}, canceled: false };
+      const expired = new Promise<void>((resolve) => {
+        entry.resolve = resolve;
+      });
+      pending.push(entry);
+      return {
+        expired,
+        cancel: () => {
+          entry.canceled = true;
+        },
+      };
+    },
+    fire: () => {
+      for (const entry of pending) if (!entry.canceled) entry.resolve();
+    },
+  };
+}
+
 /** Let the loop's queued microtasks/promises settle before asserting. */
 async function settle(): Promise<void> {
   for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 /**
- * A supervised run wired to fakes. `state` is the live world the poll samples;
+ * A supervised run wired to fakes, driving `supervise` the way flat does: one
+ * constant tenant, so the tenant axis never fires and every relaunch comes from
+ * the engine axis or a self-exit. `state` is the live world the poll samples;
  * mutate it to simulate an edited config or an advanced ref, then `tick()`.
  */
 function harness(
@@ -251,7 +288,7 @@ function harness(
   } = {},
 ) {
   const clock = gatedClock();
-  const sleepClock = gatedClock();
+  const drainTimers = gatedDrainTimer();
   const state: WatchState & { sha: string | null } = {
     config: options.initialConfig ?? "1:2",
     remoteSha: SHA_A,
@@ -268,13 +305,14 @@ function harness(
   let attempt = 0;
   let clockMs = 0;
 
-  const result = superviseEngine({
+  const result = supervise<FlatTenant>({
     now: () => clockMs,
-    onRunEnd: (run) => runs.push(run),
-    onRunTick: (tick) => ticks.push(tick.elapsedMs),
-    relaunchAfterExit: (run) => options.relaunchAfterExit?.(run) ?? false,
+    onChildRun: (run) => runs.push(run),
+    onChildTick: (tick) => ticks.push(tick.elapsedMs),
+    onChildGone: (run) =>
+      (options.relaunchAfterExit?.(run) ?? false) ? "respawn" : { propagate: run.exit },
     ...(options.drainTimeoutMs !== undefined ? { drainTimeoutMs: options.drainTimeoutMs } : {}),
-    sleep: sleepClock.wait,
+    drainTimer: drainTimers.make,
     onDrainTimeout: (reason) => drainTimeouts.push(reason),
     launch: async () => {
       const n = attempt++;
@@ -289,12 +327,15 @@ function harness(
         sample: () => ({ config: state.config, remoteSha: state.remoteSha }),
       };
     },
-    spawn: (entry, engine) => {
-      entries.push(entry);
-      resolvedConfigurations.push(engine.resolvedConfiguration);
-      const next = fakeChild();
-      children.push(next);
-      return next.child;
+    children: {
+      discover: () => [{ tenant: FLAT_TENANT, fingerprint: null }],
+      spawn: (_tenant, engine) => {
+        entries.push(engine.entry);
+        resolvedConfigurations.push(engine.resolvedConfiguration);
+        const next = fakeChild();
+        children.push(next);
+        return next.child;
+      },
     },
     stop: {
       get requested() {
@@ -302,7 +343,10 @@ function harness(
       },
       wait: clock.wait,
     },
-    onRelaunch: (reason) => relaunches.push(reason),
+    onEngineChange: (reason) => relaunches.push(reason),
+    // Flat is always exactly one child: on a stop, the container's own exit is
+    // that one engine's exit, not the generic fleet default of 0.
+    onStop: (exits) => exits[0] ?? { code: 0, signal: null },
   });
 
   return {
@@ -317,7 +361,7 @@ function harness(
     drainTimeouts,
     tick: clock.tick,
     /** Fire the drain-timeout race independently of the poll clock. */
-    tickDrainTimeout: sleepClock.tick,
+    tickDrainTimeout: drainTimers.fire,
     /** Move the injected clock forward, so run durations are asserted exactly. */
     advance: (ms: number) => {
       clockMs += ms;

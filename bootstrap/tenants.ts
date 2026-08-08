@@ -21,7 +21,7 @@
 //
 // This module only *discovers* the current set. The reconcile diff (added /
 // removed / changed / held since last poll) and the child lifecycle live in
-// the supervisor (bootstrap/supervise-fleet.ts).
+// the supervisor (bootstrap/supervise.ts).
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";

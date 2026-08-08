@@ -11,14 +11,16 @@
 // `/opt/phoebe-engine` (the dev-only `compose.local.yml` overlay, #40) — and
 // `github` — a git checkout of the engine repo at a ref (github-engine.ts, #41).
 //
-// Boot then stays in charge for the life of the container: the reconcile watch
-// (reconcile.ts, #42) polls the mounted config and the tracked ref, and when
-// either moves it drains the engine, re-resolves the source, and relaunches —
-// same container, no interrupted work unit. Following a branch also means
+// Boot then stays in charge for the life of the container: the supervision loop
+// (supervise.ts, #42/#65) polls the mounted config and the tracked ref, and when
+// either moves it drains the engine(s), re-resolves the source, and relaunches —
+// same container, no interrupted work unit. Flat is supervised as a fleet of one
+// (#65) so nested/workspace's hot add/remove/change and flat's single-engine
+// crash-loop retry are the same loop, not two. Following a branch also means
 // eventually following it onto a commit that will not boot, so every launch
 // passes through the crash-loop guard (crash-loop.ts, #43): a tip that dies fast
 // enough times is quarantined and boot materializes the last commit that ran
-// healthily instead. This module is the wiring; the loop lives in reconcile.ts,
+// healthily instead. This module is the wiring; the loop lives in supervise.ts,
 // the fallback policy in crash-loop.ts, and everything impure is passed in from
 // here.
 
@@ -46,26 +48,27 @@ import { createSlotBroker, resolveMaxConcurrent } from "./slot-broker.ts";
 import {
   discoverTenants,
   discoverWorkspaceTenants,
+  isFatalWorkspaceDiscoveryError,
   isNestedDeployment,
   withTenantConfigDir,
   type DiscoveredTenant,
   type TenantSample,
 } from "./tenants.ts";
 import { readConfigDir } from "./config-dir.ts";
-import { superviseFleet, type FleetChild, type FleetDiscoverInput } from "./supervise-fleet.ts";
 import { readWorkspaceField, type ResolvedWorkspace } from "./workspace-source.ts";
 import { readFileSync } from "node:fs";
 import {
   configFingerprint,
   deploymentConfigFingerprint,
-  superviseEngine,
-  CRASH_BACKOFF_MS,
-  DEFAULT_RECONCILE_DRAIN_TIMEOUT_MS,
-  DEFAULT_RECONCILE_INTERVAL_MS,
+  supervise,
+  CHILD_RESPAWN_BACKOFF_MS,
+  DEFAULT_DRAIN_TIMEOUT_MS,
+  DEFAULT_INTERVAL_MS,
+  type DiscoverInput,
   type EngineExit,
   type LaunchedEngine,
   type SupervisedChild,
-} from "./reconcile.ts";
+} from "./supervise.ts";
 // Untyped plain-JS import (see spawn-engine.mjs / materialize.mjs for why the
 // bootstrapper's child-process plumbing can't be TypeScript).
 import { propagateExit, spawnEngine, spawnEngineChild } from "./spawn-engine.mjs";
@@ -188,18 +191,18 @@ function engineBaseDir(): string {
  */
 function reconcileIntervalMs(): number {
   const raw = Number(process.env["PHOEBE_RECONCILE_INTERVAL_MS"]);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_RECONCILE_INTERVAL_MS;
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_INTERVAL_MS;
 }
 
 /**
- * How long a reconcile-triggered drain (config/ref change) gets before boot
- * escalates to SIGKILL (#23). `PHOEBE_RECONCILE_DRAIN_TIMEOUT_MS` overrides
- * for a deployment whose `runTimeoutMs` (the engine's own whole-unit budget)
- * is raised past the default bound.
+ * How long a drain (config/ref change, or a tenant add/remove/change) gets
+ * before boot escalates to SIGKILL (#23/#79). `PHOEBE_RECONCILE_DRAIN_TIMEOUT_MS`
+ * overrides for a deployment whose `runTimeoutMs` (the engine's own whole-unit
+ * budget) is raised past the default bound — flat and nested/workspace alike.
  */
 function reconcileDrainTimeoutMs(): number {
   const raw = Number(process.env["PHOEBE_RECONCILE_DRAIN_TIMEOUT_MS"]);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_RECONCILE_DRAIN_TIMEOUT_MS;
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_DRAIN_TIMEOUT_MS;
 }
 
 /**
@@ -409,24 +412,25 @@ export function engineProvenanceEnv(engine: {
 }
 
 /**
- * Spawn the flat single-tenant engine child. Its env routes through the same
- * `childEnv` builder the nested/workspace fleet path uses (#64): the base
- * allowlist and deployment knobs are already a subset of `process.env`, so
- * passing `process.env` itself as `secrets` — flat's trust-domain-is-the-
- * whole-container secret source — reproduces today's plain inherit exactly,
- * plus this launch's provenance and resolved-config snapshot.
+ * Spawn flat's single, constant tenant — its own engine (#65: flat is a fleet
+ * of one, so this is `children.spawn` for the flat wiring). Its env routes
+ * through the same `childEnv` builder the nested/workspace fleet path uses
+ * (#64): the base allowlist and deployment knobs are already a subset of
+ * `process.env`, so passing `process.env` itself as `secrets` — flat's
+ * trust-domain-is-the-whole-container secret source — reproduces today's plain
+ * inherit exactly, plus this launch's provenance and resolved-config snapshot.
  */
-function spawnSupervised(
-  entry: string,
-  argv: readonly string[],
-  provenanceEnv: Record<string, string>,
-): SupervisedChild {
+function spawnSupervised(engine: LaunchedEngine, argv: readonly string[]): SupervisedChild {
   let settle!: (exit: EngineExit) => void;
   const exited = new Promise<EngineExit>((resolve) => {
     settle = resolve;
   });
-  const env = childEnv({ base: process.env, secrets: process.env, extraEnv: provenanceEnv });
-  const child = spawnEngine(entry, argv, {
+  const env = childEnv({
+    base: process.env,
+    secrets: process.env,
+    extraEnv: engineProvenanceEnv(engine),
+  });
+  const child = spawnEngine(engine.entry, argv, {
     env,
     onExit: (code: number | null, signal: NodeJS.Signals | null) => settle({ code, signal }),
     onSpawnError: (error: Error) => {
@@ -469,7 +473,9 @@ function readTenantEnv(envPath: string): Record<string, string> {
  * Supervise a nested or workspace multi-tenant deployment (#58/#59/#61/#91): a
  * shared engine (#60, materialized once by `launchTarget` from the top config's
  * `engine` field) with one child per tenant, a global concurrency broker across
- * them, and hot add/remove/change via `superviseFleet`.
+ * them, and hot add/remove/change via the shared `supervise` loop (#65) — a
+ * fleet child that dies on its own is always respawned with backoff, leaving
+ * the shared engine and every sibling untouched (#60 §6).
  *
  * Each child is spawned with an IPC channel + the tenant's scrubbed env (#61)
  * and cwd (its config dir), and wired to the broker (#59). The crash-loop guard
@@ -485,12 +491,13 @@ function runFleet(opts: {
   guard: CrashGuard;
   stop: ReturnType<typeof installDrainSignal>;
   intervalMs: number;
+  drainTimeoutMs: number;
   argv: readonly string[];
-  discover: () => FleetDiscoverInput;
+  discover: () => DiscoverInput<DiscoveredTenant>;
 }): Promise<EngineExit> {
   const broker = createSlotBroker(resolveMaxConcurrent(process.env));
 
-  const spawnFleetChild = (tenant: DiscoveredTenant, engine: LaunchedEngine): FleetChild => {
+  const spawnFleetChild = (tenant: DiscoveredTenant, engine: LaunchedEngine): SupervisedChild => {
     const env = childEnv({
       base: process.env,
       secrets: readTenantEnv(tenant.envPath),
@@ -523,35 +530,41 @@ function runFleet(opts: {
     return { kill: (signal) => child.kill(signal), exited };
   };
 
-  return superviseFleet({
+  return supervise<DiscoveredTenant>({
     launch: () => launchTarget(opts.configPath, opts.guard),
-    discover: opts.discover,
-    spawn: spawnFleetChild,
+    children: { discover: opts.discover, spawn: spawnFleetChild },
+    onChildGone: (run) => {
+      console.error(
+        `[phoebe] boot: tenant ${run.tenant.id} exited (${run.exit.code ?? run.exit.signal}) — ` +
+          `respawning with backoff (per-tenant supervision; the shared engine is untouched).`,
+      );
+      return "respawn";
+    },
     stop: opts.stop,
     intervalMs: opts.intervalMs,
+    drainTimeoutMs: opts.drainTimeoutMs,
     onEngineChange: (reason) =>
       console.log(
         reason === "config"
           ? "[phoebe] boot: shared config changed — draining the fleet and relaunching every tenant."
           : "[phoebe] boot: tracked engine ref advanced — draining the fleet and relaunching every tenant.",
       ),
-    onTenantChange: ({ added, removed, changed }) =>
+    onChildChange: ({ added, removed, changed }) =>
       console.log(
         `[phoebe] boot: tenant reconcile — +${added.length} added, -${removed.length} removed, ` +
           `~${changed.length} relaunched (no container restart).`,
       ),
-    onChildExit: ({ tenantId, exit }) =>
-      console.error(
-        `[phoebe] boot: tenant ${tenantId} exited (${exit.code ?? exit.signal}) — ` +
-          `respawning with backoff (per-tenant supervision; the shared engine is untouched).`,
-      ),
     onLaunchError: (error) =>
       console.error(`[phoebe] boot: fleet (re)launch failed — ${describe(error)}. Retrying.`),
-    onDiscoverError: (error) =>
+    onDiscoverError: (error) => {
+      // A fatal identity clash (#92: duplicate workspace slug or origin) must
+      // abort boot, not soft-skip like a transient `repos/` read error.
+      if (isFatalWorkspaceDiscoveryError(error)) throw error;
       console.warn(
         `[phoebe] boot: tenant discovery failed — ${describe(error)}. ` +
           `Skipping the tenant axis this poll (the running fleet is left intact).`,
-      ),
+      );
+    },
   });
 }
 
@@ -563,7 +576,7 @@ function runFleet(opts: {
  * the same skip-and-hold workspace discovery uses (#86), so a misconfigured
  * tenant surfaces loudly rather than silently running against the wrong `.env`.
  */
-function nestedDiscover(configDir: string): () => FleetDiscoverInput {
+function nestedDiscover(configDir: string): () => DiscoverInput<DiscoveredTenant> {
   return async () => {
     const samples: TenantSample[] = [];
     const hold: string[] = [];
@@ -593,7 +606,7 @@ function nestedDiscover(configDir: string): () => FleetDiscoverInput {
 function workspaceDiscover(
   configDir: string,
   workspace: ResolvedWorkspace,
-): () => FleetDiscoverInput {
+): () => DiscoverInput<DiscoveredTenant> {
   return async () => {
     const result = await discoverWorkspaceTenants(configDir, workspace.depth, {
       loadRepoSlug: loadTenantRepoSlug,
@@ -676,6 +689,7 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
   const configPath = resolveConfigPath(undefined, configDir);
   const guard = createBootCrashGuard();
   const intervalMs = reconcileIntervalMs();
+  const drainTimeoutMs = reconcileDrainTimeoutMs();
 
   // The container's stop request. A one-way latch, and the poll clock: a
   // SIGTERM mid-poll wakes the watch immediately instead of sleeping out the
@@ -715,6 +729,7 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
         guard,
         stop,
         intervalMs,
+        drainTimeoutMs,
         argv,
         discover: workspaceDiscover(configDir, workspace),
       });
@@ -741,6 +756,7 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
         guard,
         stop,
         intervalMs,
+        drainTimeoutMs,
         argv,
         discover: nestedDiscover(configDir),
       });
@@ -751,27 +767,39 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
     return;
   }
 
+  // Flat is a fleet of one (#65): the top config's own dir, run in place. Its
+  // tenant fingerprint is constant (null) so the tenant axis never fires — the
+  // engine axis (config/ref) is its only relaunch trigger, one edit is one
+  // relaunch, not two.
+  const flatTenant = discovery.tenants[0];
+
   let exit: EngineExit;
   try {
-    exit = await superviseEngine({
+    exit = await supervise<DiscoveredTenant>({
       launch: () => launchTarget(configPath, guard),
-      spawn: (entry, engine) => spawnSupervised(entry, argv, engineProvenanceEnv(engine)),
-      stop,
-      intervalMs,
-      drainTimeoutMs: reconcileDrainTimeoutMs(),
-      onRunEnd: (run) => guard.record(run),
-      onRunTick: ({ engine, elapsedMs }) => {
-        if (engine.sha !== null) guard.noteAlive(engine.sha, elapsedMs);
+      children: {
+        discover: () => [{ tenant: flatTenant, fingerprint: null }],
+        spawn: (_tenant, engine) => spawnSupervised(engine, argv),
       },
-      relaunchAfterExit: (run) => {
-        if (!guard.shouldRetry(run)) return false;
+      onChildGone: (run) => {
+        if (!guard.shouldRetry(run)) return { propagate: run.exit };
         console.log(
-          `[phoebe] boot: relaunching the engine in ${Math.round(CRASH_BACKOFF_MS / 1000)}s — ` +
+          `[phoebe] boot: relaunching the engine in ${Math.round(CHILD_RESPAWN_BACKOFF_MS / 1000)}s — ` +
             `a last-good engine commit is available to fall back to.`,
         );
-        return true;
+        return "respawn";
       },
-      onRelaunch: (reason) =>
+      onChildRun: (run) => guard.record(run),
+      onChildTick: ({ engine, elapsedMs }) => {
+        if (engine.sha !== null) guard.noteAlive(engine.sha, elapsedMs);
+      },
+      // Flat is always exactly one child (#65): on a stop, the container's own
+      // exit is that one engine's exit, not a generic 0.
+      onStop: (exits) => exits[0] ?? { code: 0, signal: null },
+      stop,
+      intervalMs,
+      drainTimeoutMs,
+      onEngineChange: (reason) =>
         console.log(
           reason === "config"
             ? "[phoebe] boot: mounted config changed — draining the engine (SIGTERM) and relaunching."
@@ -780,7 +808,7 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
       onDrainTimeout: (reason) =>
         console.error(
           `[phoebe] boot: the engine did not finish draining for a ${reason} change within ` +
-            `${Math.round(reconcileDrainTimeoutMs() / 1000)}s — escalating to SIGKILL so the ` +
+            `${Math.round(drainTimeoutMs / 1000)}s — escalating to SIGKILL so the ` +
             `upgrade is not wedged.`,
         ),
       onLaunchError: (error) =>

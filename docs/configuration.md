@@ -265,7 +265,7 @@ under one slug-keyed root on the `phoebe-data` volume:
 | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `/data/repos/<owner>/<repo>/repo`      | The private clone (origin hub).                                                                                                          |
 | `/data/repos/<owner>/<repo>/worktrees` | Per-unit git worktrees.                                                                                                                  |
-| `/data/repos/<owner>/<repo>/state`     | Per-tenant state — the supervisor's `status.json`.                                                                                       |
+| `/data/repos/<owner>/<repo>/state`     | Per-tenant state — the supervisor's `status-v2.json`, `runtime-id`, and `events-v1/` outcome journal.                                    |
 | `/data/engine`                         | The **shared** engine checkout + the crash-loop record (`engine-crash-loop.json`), deployment-global, on its own `phoebe-engine` volume. |
 
 The base is `/data/repos` in the container; `PHOEBE_DATA_DIR` overrides it for
