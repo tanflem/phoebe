@@ -19,9 +19,10 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
-import { CONFIG_DEFAULTS, PROVIDER_NAMES, type ProviderName } from "./config-schema.ts";
+import { PROVIDER_NAMES, type ProviderName } from "./config/index.ts";
 import { parseDotenv } from "./dotenv.ts";
 import {
+  DEFAULT_RESOLVED_CONFIG,
   DEFAULT_TEMPLATE_PARAMS,
   formatInitReport,
   readTemplate,
@@ -412,7 +413,7 @@ export async function runSetup(opts: RunSetupOptions): Promise<void> {
     write("\nAI provider\n");
     const providerDefault = isProviderName(existing.defaultProvider)
       ? existing.defaultProvider
-      : CONFIG_DEFAULTS.defaultProvider;
+      : DEFAULT_RESOLVED_CONFIG.defaultProvider;
     const defaultIndex = Math.max(0, PROVIDER_ORDER.indexOf(providerDefault));
     const providerIndex = await prompter.pick(
       "  Which agent CLI should Phoebe run by default?",
@@ -420,10 +421,10 @@ export async function runSetup(opts: RunSetupOptions): Promise<void> {
       { defaultIndex },
     );
     const provider = PROVIDER_ORDER[providerIndex];
-    const model = CONFIG_DEFAULTS.defaultModels[provider];
+    const model = DEFAULT_RESOLVED_CONFIG.defaultModels[provider];
     write(`  → ${provider} runs model ${model} by default (override with PHOEBE_MODEL).\n`);
 
-    const providerEnvVar = CONFIG_DEFAULTS.providerEnv[provider];
+    const providerEnvVar = DEFAULT_RESOLVED_CONFIG.providerEnv[provider];
 
     write("\nSecrets (blank is OK — fill them into .env later)\n");
     write(`  GH_TOKEN — create one at ${GH_TOKEN_LINK}\n`);

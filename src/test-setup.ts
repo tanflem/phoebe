@@ -9,8 +9,8 @@
 // defaults; tests that want a different config can call `setResolvedConfig`
 // with their own value before the module under test triggers a read.
 
-import { resolveConfig } from "./config-schema.ts";
+import { resolveConfiguration } from "./config/index.ts";
 import { setResolvedConfig } from "./resolved-config.ts";
 import { config as sampleUserConfig } from "../phoebe.config.ts";
 
-setResolvedConfig(resolveConfig(sampleUserConfig));
+setResolvedConfig(resolveConfiguration({ repository: sampleUserConfig }).config);

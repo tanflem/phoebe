@@ -4,7 +4,7 @@
 // the engine (`src/`) from a git ref or a local mount, then runs it. The only
 // part of the consumer's mounted `phoebe.config.ts` the bootstrapper needs is
 // the `engine` field — the full config schema stays the engine's concern
-// (config-schema.ts + resolveConfig). This module is that minimal reader: it
+// (src/config/). This module is that minimal reader: it
 // takes the `engine` field (or a loaded config carrying it) and returns the
 // resolved source with defaults applied, and nothing else.
 //
@@ -17,7 +17,7 @@ import {
   validateEngineSourceField,
   type EngineSourceField,
   type ResolvedEngineSource,
-} from "../src/config-schema.ts";
+} from "../src/config/types.ts";
 
 /** Repo the engine is cloned from when `source: "github"` omits `repo`. */
 export const DEFAULT_ENGINE_REPO = "JesusFilm/phoebe";

@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
-import { BOOTSTRAP_RESOLVED_CONFIG_ENV } from "../config-resolution.ts";
+import { BOOTSTRAP_RESOLVED_CONFIG_ENV } from "../config/index.ts";
 import { loadEngineConfiguration } from "./engine.ts";
 import { parseConfigResolveArgs, runConfigResolve } from "./config-resolve.ts";
 

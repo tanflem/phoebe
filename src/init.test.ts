@@ -1,6 +1,6 @@
 // Init scaffolder contract:
-//   * plan enumerates every consumer-owned file (prompts derived from
-//     `CONFIG_DEFAULTS.promptFiles` so drift is impossible),
+//   * plan enumerates every consumer-owned file (prompts derived from the
+//     roster's `promptFiles` default so drift is impossible),
 //   * template rendering substitutes every `{{TOKEN}}` and throws on unknowns,
 //   * `.gitignore` merges are additive (no dedup gap, no clobber),
 //   * `runInit` never overwrites an existing file (the guarded-re-run
@@ -11,8 +11,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
-import { CONFIG_DEFAULTS } from "./config-schema.ts";
 import {
+  DEFAULT_RESOLVED_CONFIG,
   DEFAULT_TEMPLATE_PARAMS,
   formatInitReport,
   initTenant,
@@ -44,7 +44,7 @@ describe("planInitOutputs", () => {
     expect(dests).toContain("container/compose.local.yml");
     expect(dests).toContain(".gitignore");
     expect(dests).not.toContain("container/README.md");
-    for (const promptPath of Object.values(CONFIG_DEFAULTS.promptFiles)) {
+    for (const promptPath of Object.values(DEFAULT_RESOLVED_CONFIG.promptFiles)) {
       expect(dests).toContain(promptPath);
     }
   });
@@ -61,7 +61,7 @@ describe("planInitOutputs", () => {
       "container/README.md",
       ".gitignore",
     ]);
-    for (const promptPath of Object.values(CONFIG_DEFAULTS.promptFiles)) {
+    for (const promptPath of Object.values(DEFAULT_RESOLVED_CONFIG.promptFiles)) {
       expect(dests).not.toContain(promptPath);
     }
   });
@@ -254,7 +254,7 @@ describe("runInit", () => {
     expect(config).toContain(`testCommand: "npm test"`);
     // Default provider matches the engine default, so init's resolved config is
     // unchanged from before these fields were tokenized.
-    expect(config).toContain(`defaultProvider: "${CONFIG_DEFAULTS.defaultProvider}"`);
+    expect(config).toContain(`defaultProvider: "${DEFAULT_RESOLVED_CONFIG.defaultProvider}"`);
   });
 
   test("does not overwrite existing files on re-run", () => {

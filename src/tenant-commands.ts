@@ -36,7 +36,7 @@ import {
   TENANT_ENV_FILE,
 } from "../bootstrap/tenants.ts";
 import { readWorkspaceField } from "../bootstrap/workspace-source.ts";
-import { loadUserConfig } from "./load-config.ts";
+import { loadUserConfig } from "./config/index.ts";
 import { ContractCapabilityError, type QueueEntry } from "./status-contract.ts";
 import { readStatusSnapshot, type StatusReadResult } from "./status-store.ts";
 

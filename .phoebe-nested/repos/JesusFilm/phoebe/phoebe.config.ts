@@ -6,7 +6,7 @@
 //
 // Type-only import, resolved into this repo's own source since that is what the
 // container runs; erased at runtime by Node's type-stripping.
-import type { PhoebeUserConfig } from "../../../../src/config-schema.ts";
+import type { PhoebeUserConfig } from "../../../../src/config/types.ts";
 
 const config: PhoebeUserConfig = {
   repoSlug: "JesusFilm/phoebe",

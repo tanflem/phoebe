@@ -1,7 +1,8 @@
-// Tests for the consumer-facing config plumbing in ./load-config.ts:
+// Tests for the consumer-facing config plumbing exported from ./config/index.ts:
 //
-//   - `applyEnvOverlay` overlays scalar `PHOEBE_*` keys, validates the enum
-//     ones, and leaves the input object untouched.
+//   - the `PHOEBE_*` scalar/enum env overlay, exercised through
+//     `resolveConfiguration`'s `env` option (the overlay itself,
+//     `applyEnvOverlay`, is implementation — #55).
 //   - `resolveConfigPath` returns absolute paths and rejects missing files
 //     with a message that distinguishes an explicit --config from the default.
 //   - `loadUserConfig` accepts both `export default` and named `export const
@@ -14,12 +15,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 import {
-  ENV_OVERLAY_KEYS,
-  applyEnvOverlay,
   loadUserConfig,
   resolveConfigPath,
-} from "./load-config.ts";
-import type { PhoebeUserConfig } from "./config-schema.ts";
+  resolveConfiguration,
+  type PhoebeUserConfig,
+} from "./config/index.ts";
 
 function baseUser(overrides: Partial<PhoebeUserConfig> = {}): PhoebeUserConfig {
   return {
@@ -32,73 +32,76 @@ function baseUser(overrides: Partial<PhoebeUserConfig> = {}): PhoebeUserConfig {
   };
 }
 
-describe("applyEnvOverlay", () => {
-  test("returns a new object — does not mutate the input", () => {
-    const input = baseUser();
-    const result = applyEnvOverlay(input, { PHOEBE_REPO_SLUG: "other/repo" });
-    expect(result).not.toBe(input);
-    expect(input.repoSlug).toBe("acme/widget");
-    expect(result.repoSlug).toBe("other/repo");
-  });
+function resolveWithEnv(env: NodeJS.ProcessEnv) {
+  return resolveConfiguration({ repository: baseUser(), env }).config;
+}
 
+describe("PHOEBE_* env overlay (via resolveConfiguration)", () => {
   test("unset env vars leave the config field untouched", () => {
-    const result = applyEnvOverlay(baseUser(), {});
-    expect(result.repoSlug).toBe("acme/widget");
-    expect(result.installCommand).toBe("npm ci");
+    const resolved = resolveWithEnv({});
+    expect(resolved.repoSlug).toBe("acme/widget");
+    expect(resolved.installCommand).toBe("npm ci");
   });
 
   test("empty-string env vars are ignored (treated the same as unset)", () => {
-    const result = applyEnvOverlay(baseUser(), { PHOEBE_REPO_SLUG: "" });
-    expect(result.repoSlug).toBe("acme/widget");
+    expect(resolveWithEnv({ PHOEBE_REPO_SLUG: "" }).repoSlug).toBe("acme/widget");
   });
 
-  test("every scalar overlay key maps to the documented user-config field", () => {
-    const env: NodeJS.ProcessEnv = {};
-    for (const { env: k } of ENV_OVERLAY_KEYS) env[k] = `sentinel-${k}`;
-    const result = applyEnvOverlay(baseUser(), env);
-    for (const { env: k, key } of ENV_OVERLAY_KEYS) {
-      expect(result[key]).toBe(`sentinel-${k}`);
-    }
+  // Every scalar/enum overlay key documented in docs/configuration.md, paired
+  // with a value valid for that field. A field-scoped table (rather than magic
+  // name-mangling) keeps the surface documented and predictable.
+  const SCALAR_OVERLAYS = [
+    ["PHOEBE_REPO_SLUG", "repoSlug", "env/repo"],
+    ["PHOEBE_REPO_URL", "repoUrl", "https://example.invalid/env-repo.git"],
+    ["PHOEBE_DEFAULT_BRANCH", "defaultBranch", "trunk"],
+    ["PHOEBE_BRANCH_PREFIX", "branchPrefix", "env/"],
+    ["PHOEBE_READY_LABEL", "readyLabel", "env-ready"],
+    ["PHOEBE_RESEARCH_LABEL", "researchLabel", "env-research"],
+    ["PHOEBE_PROCESSING_LABEL", "processingLabel", "env-processing"],
+    ["PHOEBE_PR_OPT_OUT_LABEL", "prOptOutLabel", "env-opt-out"],
+    ["PHOEBE_INSTALL_COMMAND", "installCommand", "env install"],
+    ["PHOEBE_CHECK_COMMAND", "checkCommand", "env check"],
+    ["PHOEBE_TEST_COMMAND", "testCommand", "env test"],
+    ["PHOEBE_READY_COMMAND", "readyCommand", "env ready"],
+    ["PHOEBE_BLOCKED_BY_PATTERN", "blockedByPattern", String.raw`Env blocked by\s+#(\d+)`],
+    ["PHOEBE_REVIEWS_SUCCESS_HEADING", "reviewsSuccessHeading", "## env heading"],
+  ] as const;
+
+  test.each(SCALAR_OVERLAYS)("%s overlays %s", (envKey, field, value) => {
+    const resolved = resolveWithEnv({ [envKey]: value });
+    expect(resolved[field]).toBe(value);
   });
 
-  test("PHOEBE_PR_SCOPE overlays and validates the enum", () => {
-    expect(applyEnvOverlay(baseUser(), { PHOEBE_PR_SCOPE: "all" }).prScope).toBe("all");
-    expect(() => applyEnvOverlay(baseUser(), { PHOEBE_PR_SCOPE: "bogus" })).toThrow(
-      /PHOEBE_PR_SCOPE/,
-    );
+  const ENUM_OVERLAYS = [
+    ["PHOEBE_PR_SCOPE", "prScope", "all", "bogus"],
+    ["PHOEBE_PR_BASE_SCOPE", "prBaseScope", "all", "bogus"],
+    ["PHOEBE_DRAFT_PRS", "draftPrs", "include", "bogus"],
+    ["PHOEBE_BLOCKER_SOURCE", "blockerSource", "both", "bogus"],
+    ["PHOEBE_STACK_MODE", "stackMode", "off", "bogus"],
+    ["PHOEBE_DEFAULT_PROVIDER", "defaultProvider", "claude", "bogus"],
+  ] as const;
+
+  test.each(ENUM_OVERLAYS)("%s overlays and validates %s", (envKey, field, valid, invalid) => {
+    expect(resolveWithEnv({ [envKey]: valid })[field]).toBe(valid);
+    expect(() => resolveWithEnv({ [envKey]: invalid })).toThrow(new RegExp(envKey));
   });
 
-  test("PHOEBE_DRAFT_PRS overlays and validates the enum", () => {
-    expect(applyEnvOverlay(baseUser(), { PHOEBE_DRAFT_PRS: "include" }).draftPrs).toBe("include");
-    expect(() => applyEnvOverlay(baseUser(), { PHOEBE_DRAFT_PRS: "bogus" })).toThrow(
-      /PHOEBE_DRAFT_PRS/,
-    );
-  });
-
-  test("PHOEBE_DEFAULT_PROVIDER overlays and validates the enum", () => {
-    expect(applyEnvOverlay(baseUser(), { PHOEBE_DEFAULT_PROVIDER: "claude" }).defaultProvider).toBe(
-      "claude",
-    );
-    expect(() => applyEnvOverlay(baseUser(), { PHOEBE_DEFAULT_PROVIDER: "bogus" })).toThrow(
-      /PHOEBE_DEFAULT_PROVIDER/,
-    );
-  });
-
-  test("PHOEBE_BLOCKER_SOURCE overlays and validates the enum", () => {
-    expect(applyEnvOverlay(baseUser(), { PHOEBE_BLOCKER_SOURCE: "both" }).blockerSource).toBe(
-      "both",
-    );
-    expect(() => applyEnvOverlay(baseUser(), { PHOEBE_BLOCKER_SOURCE: "bogus" })).toThrow(
-      /PHOEBE_BLOCKER_SOURCE/,
-    );
-  });
-
-  test("PHOEBE_STACK_MODE overlays and validates the enum", () => {
-    expect(applyEnvOverlay(baseUser(), { PHOEBE_STACK_MODE: "native" }).stackMode).toBe("native");
-    expect(applyEnvOverlay(baseUser(), { PHOEBE_STACK_MODE: "off" }).stackMode).toBe("off");
-    expect(() => applyEnvOverlay(baseUser(), { PHOEBE_STACK_MODE: "bogus" })).toThrow(
-      /PHOEBE_STACK_MODE/,
-    );
+  test("prAuthors, promptFiles, workOrder, and the run-protection knobs are not env-overridable here", () => {
+    // prAuthors/promptFiles/workOrder are structured shapes — config-file
+    // territory, not this scalar overlay. The four run-protection knobs
+    // (runTimeoutMs etc.) are read directly from `PHOEBE_*` against the
+    // *resolved* value elsewhere (src/run-timeout.ts, src/quarantine.ts,
+    // src/claim-lease.ts), not through this overlay.
+    const resolved = resolveWithEnv({
+      PHOEBE_RUN_TIMEOUT_MS: "1",
+      PHOEBE_MAX_UNIT_TIMEOUTS: "1",
+      PHOEBE_MAX_UNIT_ATTEMPTS: "1",
+      PHOEBE_LEASE_TTL_MS: "1",
+    });
+    expect(resolved.runTimeoutMs).toBe(2_700_000);
+    expect(resolved.maxUnitTimeouts).toBe(3);
+    expect(resolved.maxUnitAttempts).toBe(3);
+    expect(resolved.leaseTtlMs).toBe(1_800_000);
   });
 });
 

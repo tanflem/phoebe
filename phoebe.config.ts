@@ -16,10 +16,10 @@
 // ```
 //
 // Only five fields are required (repo slug, clone URL, install/check/test
-// commands). Everything else is optional and filled from `CONFIG_DEFAULTS`
-// (see src/config-schema.ts) by `resolveConfig()`. Add entries here only when
-// overriding a shipped default; `PHOEBE_*` env vars provide one-off overrides
-// for a subset of scalar fields (see src/load-config.ts).
+// commands). Everything else is optional and filled from the roster's shipped
+// defaults (see src/config/) by `resolveConfiguration()`. Add entries here only
+// when overriding a shipped default; `PHOEBE_*` env vars provide one-off
+// overrides for a subset of scalar fields (see src/config/resolve.ts).
 
 import { defineConfig } from "./bootstrap/define-config.ts";
 

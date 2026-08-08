@@ -33,11 +33,12 @@ import { defaultGit, type GitRunner } from "../src/git-model.ts";
 import {
   BOOTSTRAP_RESOLVED_CONFIG_ENV,
   formatResolvedConfiguration,
-  loadResolvedConfiguration,
+  loadConfiguration,
+  loadUserConfig,
   resolveBaseConfigPath,
+  resolveConfigPath,
   type ResolvedConfiguration,
-} from "../src/config-resolution.ts";
-import { loadUserConfig, resolveConfigPath } from "../src/load-config.ts";
+} from "../src/config/index.ts";
 import { createCrashGuard, type CrashGuard } from "./crash-loop.ts";
 import type { ResolvedEngineSource } from "./engine-source.ts";
 import { lsRemoteBranchSha, materializeGithubEngine } from "./github-engine.ts";
@@ -219,7 +220,8 @@ export function loadBootConfiguration(
   env: NodeJS.ProcessEnv,
   fingerprint: string | null,
 ): Promise<ResolvedConfiguration> {
-  return loadResolvedConfiguration(configPath, {
+  return loadConfiguration({
+    repositoryPath: configPath,
     env,
     reloadKey: fingerprint ?? undefined,
   });

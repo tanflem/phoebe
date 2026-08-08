@@ -1,8 +1,7 @@
 // `phoebe status --json` — read the local status-v2 projection without
 // starting work or contacting GitHub.
 
-import { resolveConfigPath } from "../load-config.ts";
-import { loadResolvedConfiguration } from "../config-resolution.ts";
+import { loadConfiguration, resolveConfigPath } from "../config/index.ts";
 import { ContractCapabilityError, STATUS_SCHEMA_VERSION } from "../status-contract.ts";
 import { readStatusSnapshot } from "../status-store.ts";
 import { parseCliArgs } from "./engine.ts";
@@ -45,7 +44,7 @@ export const statusCommand: Command = {
       return 0;
     }
     const configPath = resolveConfigPath(parsed.configPath, ctx.cwd);
-    const resolved = await loadResolvedConfiguration(configPath, { env: ctx.env });
+    const resolved = await loadConfiguration({ repositoryPath: configPath, env: ctx.env });
     try {
       const result = readStatusSnapshot(resolved.config.paths.stateDir);
       ctx.stdout.write(

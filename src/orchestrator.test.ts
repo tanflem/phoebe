@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { asBranchRef, asPrNumber, asSha } from "./branded.ts";
-import { resolveConfig } from "./config-schema.ts";
+import { resolveConfiguration, type PhoebeUserConfig } from "./config/index.ts";
 import { setResolvedConfig } from "./resolved-config.ts";
 import { config as sampleUserConfig } from "../phoebe.config.ts";
-import type { BlockerSource } from "./config-schema.ts";
+import type { BlockerSource } from "./config/index.ts";
+
+function resolveConfig(user: PhoebeUserConfig) {
+  return resolveConfiguration({ repository: user }).config;
+}
 import {
   buildChecksFailWatermarkMarker,
   buildConflictFailWatermarkMarker,

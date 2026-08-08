@@ -1,15 +1,15 @@
 // Bootstrapper-only `configDir` reader (#98).
 //
 // Mirrors `engine-source.ts` / `workspace-source.ts`: `configDir` is a
-// bootstrapper concern the engine never reads (`resolveConfig` drops it, same
-// as `engine`/`workspace`). It relocates a tenant's asset directory — where its
-// co-located `.env` and prompt/asset files live — to a subdirectory of the dir
-// holding its `phoebe.config.ts`, so a workspace/nested tenant can reuse its
-// standalone `.phoebe/` folder instead of duplicating `.env` and `prompts/` at
-// the repo root.
+// bootstrapper concern the engine never reads (`resolveConfiguration` drops it,
+// same as `engine`/`workspace`). It relocates a tenant's asset directory —
+// where its co-located `.env` and prompt/asset files live — to a subdirectory
+// of the dir holding its `phoebe.config.ts`, so a workspace/nested tenant can
+// reuse its standalone `.phoebe/` folder instead of duplicating `.env` and
+// `prompts/` at the repo root.
 //
-// The value is validated the same way `src/config-schema.ts` validates it, but
-// read here from the untyped mounted config before the engine validates — a
+// The value is validated the same way `src/config/` validates it, but read
+// here from the untyped mounted config before the engine validates — a
 // malformed value fails the discovery walk (skip-and-warn) rather than silently
 // falling back to co-location.
 

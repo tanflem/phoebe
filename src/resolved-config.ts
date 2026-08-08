@@ -10,7 +10,7 @@
 // pointer at the CLI/setup path, so an accidentally repo-coupled engine import
 // fails loudly at the callsite instead of silently reading `undefined`.
 
-import type { PhoebeConfig } from "./config-schema.ts";
+import type { PhoebeConfig } from "./config/index.ts";
 
 let resolved: PhoebeConfig | null = null;
 

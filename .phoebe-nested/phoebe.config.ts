@@ -13,7 +13,7 @@
 //
 // Type-only import, like both scaffolds: this file is loaded from a container
 // mount with no reachable `node_modules`, so a value import could not resolve.
-import type { PhoebeUserConfig } from "../src/config-schema.ts";
+import type { PhoebeUserConfig } from "../src/config/types.ts";
 
 // Only `engine` is read from the deployment root; the five required per-repo
 // fields live per-tenant, so the type is narrowed to say exactly that. The

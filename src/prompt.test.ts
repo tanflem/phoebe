@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
-import { resolveConfig, type PhoebeUserConfig } from "./config-schema.ts";
+import { resolveConfiguration, type PhoebeConfig, type PhoebeUserConfig } from "./config/index.ts";
 import {
   buildDefaultPromptArgs,
   loadPromptTemplate,
@@ -11,7 +11,7 @@ import {
   substitutePromptArgs,
 } from "./prompt.ts";
 
-function fixtureConfig(): ReturnType<typeof resolveConfig> {
+function fixtureConfig(): PhoebeConfig {
   const user: PhoebeUserConfig = {
     repoSlug: "acme/widget",
     repoUrl: "https://github.com/acme/widget.git",
@@ -20,7 +20,7 @@ function fixtureConfig(): ReturnType<typeof resolveConfig> {
     testCommand: "npm test",
     readyCommand: "npm run ready",
   };
-  return resolveConfig(user);
+  return resolveConfiguration({ repository: user }).config;
 }
 
 describe("substitutePromptArgs", () => {
@@ -84,7 +84,7 @@ describe("buildDefaultPromptArgs", () => {
       testCommand: "npm test",
       issueSource: { repoSlug: "acme/planning", readyLabel: "triaged" },
     };
-    const args = buildDefaultPromptArgs(resolveConfig(user));
+    const args = buildDefaultPromptArgs(resolveConfiguration({ repository: user }).config);
     expect(args["ISSUE_SOURCE_REPO_SLUG"]).toBe("acme/planning");
     expect(args["READY_LABEL"]).toBe("triaged");
   });

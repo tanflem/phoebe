@@ -4,7 +4,7 @@
 // this engine), trimmed to what Phoebe uses: one print-mode run per work unit,
 // no session capture, no interactive mode.
 
-import type { ProviderName } from "../config-schema.ts";
+import type { ProviderName } from "../config/index.ts";
 
 /** A ready-to-spawn CLI invocation. `argv[0]` is the binary; no shell involved. */
 export type AgentCommand = {

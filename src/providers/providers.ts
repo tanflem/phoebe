@@ -4,7 +4,7 @@
 // knowledge of each CLI's output format.
 
 import type { AgentCommand, AgentEvent, Provider } from "./types.ts";
-import type { ProviderName } from "../config-schema.ts";
+import type { ProviderName } from "../config/index.ts";
 
 /** Maps allowlisted tool names to the input field carrying the display arg. */
 const TOOL_ARG_FIELDS: Record<string, string> = {

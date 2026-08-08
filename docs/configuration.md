@@ -1,8 +1,9 @@
 # Configuration
 
 The complete reference for `phoebe.config.ts` — every field, its default, and
-the `PHOEBE_*` environment overlay. The shape is defined in
-`src/config-schema.ts`; the engine reads a fully-resolved copy where every
+the `PHOEBE_*` environment overlay. The shape is defined in `src/config/`
+(`src/config/types.ts` for the types, `src/config/roster.ts` for the
+field-descriptor table); the engine reads a fully-resolved copy where every
 optional field has been filled from the shipped defaults.
 
 ## The config file
@@ -444,7 +445,7 @@ simply never causes a fallback.) Every fallback event is logged with both SHAs
 ## Environment overlay (`PHOEBE_*`)
 
 `PHOEBE_*` env vars provide **one-off run overrides** without editing
-`phoebe.config.ts` (`src/load-config.ts`). The overlay is additive: an unset
+`phoebe.config.ts` (`src/config/resolve.ts`). The overlay is additive: an unset
 var leaves the field untouched, so `resolveConfig` can still fall back to a
 default. Only **scalar** fields are overlayable — nested records
 (`promptFiles`, `defaultModels`, `providerEnv`, `workOrder`) stay
@@ -469,6 +470,7 @@ config-file territory.
 | `PHOEBE_STACK_MODE`              | `stackMode`             | Validated: must be `banner`, `native`, or `off`.        |
 | `PHOEBE_REVIEWS_SUCCESS_HEADING` | `reviewsSuccessHeading` |                                                         |
 | `PHOEBE_PR_SCOPE`                | `prScope`               | Validated: must be `phoebe` or `all`.                   |
+| `PHOEBE_PR_BASE_SCOPE`           | `prBaseScope`           | Validated: must be `default` or `all`.                  |
 | `PHOEBE_DRAFT_PRS`               | `draftPrs`              | Validated: `skip-non-phoebe`, `skip-all`, or `include`. |
 | `PHOEBE_DEFAULT_PROVIDER`        | `defaultProvider`       | Validated: `cursor`, `claude`, or `codex`.              |
 

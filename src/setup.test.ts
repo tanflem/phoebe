@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vite-plus/test";
-import { CONFIG_DEFAULTS } from "./config-schema.ts";
+import { DEFAULT_RESOLVED_CONFIG } from "./init.ts";
 import {
   createReadlinePrompter,
   extractConfigValues,
@@ -288,7 +288,7 @@ describe("runSetup", () => {
     expect(env).toContain("OPENAI_KEY=");
 
     // Provider default index pointed at the engine default provider's slot.
-    expect(rec.pickDefaultIndex).toBe(1); // CONFIG_DEFAULTS.defaultProvider === "cursor" → index 1
+    expect(rec.pickDefaultIndex).toBe(1); // DEFAULT_RESOLVED_CONFIG.defaultProvider === "cursor" → index 1
   });
 
   test("never prints either secret", async () => {
@@ -317,7 +317,7 @@ describe("runSetup", () => {
     });
     expect(text()).not.toContain("ghsecretVALUE");
     expect(text()).not.toContain("antsecretVALUE");
-    expect(text()).toContain(`runs model ${CONFIG_DEFAULTS.defaultModels.claude}`);
+    expect(text()).toContain(`runs model ${DEFAULT_RESOLVED_CONFIG.defaultModels.claude}`);
     expect(text()).toContain("Next steps:");
     expect(text()).toContain("docker compose --env-file ../.env up -d");
   });

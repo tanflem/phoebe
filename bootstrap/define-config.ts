@@ -14,7 +14,7 @@
 // the whole benefit is editor autocomplete and a compile-time check that only
 // known fields appear.
 
-import type { PhoebeUserConfig } from "../src/config-schema.ts";
+import type { PhoebeUserConfig } from "../src/config/types.ts";
 
 export function defineConfig(config: PhoebeUserConfig): PhoebeUserConfig {
   return config;

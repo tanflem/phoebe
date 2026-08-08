@@ -24,7 +24,7 @@ the canonical shape, then scaffold your own with `npx --yes phoebe-agent init`.
 The `acme/widget` naming is fictional and shared across all three examples so
 they read as one progression.
 
-The config type-checks against the live schema (`src/config-schema.ts`) as part
+The config type-checks against the live schema (`src/config/types.ts`) as part
 of the repo's `typecheck` — if the schema changes underneath it, this example
 fails CI rather than silently rotting.
 
