@@ -1,5 +1,6 @@
 // Poison-unit repeat protection (#75) — a unit-scoped quarantine policy layered
-// on #73's `UnitEvent`/`emitUnitEvent` rail and a GitHub-marker durable home.
+// on #60's `unit-quarantined` runtime-status transition and a GitHub-marker
+// durable home.
 //
 // #72's timeout keeps a hung unit from starving the fleet, but it does not stop
 // a *genuinely* poisonous unit — one that hangs the agent every rotation — from

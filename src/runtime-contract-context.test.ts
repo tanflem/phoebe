@@ -59,6 +59,7 @@ describe("runtime contract digests", () => {
       Object.values(context.digests).every((value) => /^sha256:[0-9a-f]{64}$/.test(value)),
     ).toBe(true);
     expect(context.provider.digest).toBe(context.digests.providerModel);
-    expect(JSON.stringify(context)).not.toContain("super-secret");
+    expect(context.secrets).toContain("super-secret");
+    expect(JSON.stringify({ ...context, secrets: undefined })).not.toContain("super-secret");
   });
 });

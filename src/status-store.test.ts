@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vite-plus/test";
@@ -6,6 +6,7 @@ import { STATUS_SCHEMA_VERSION, type StatusSnapshot } from "./status-contract.ts
 import {
   loadOrCreateRuntimeId,
   readStatusSnapshot,
+  STATUS_SNAPSHOT_FILE,
   statusSnapshotPath,
   writeStatusSnapshot,
 } from "./status-store.ts";
@@ -93,6 +94,9 @@ describe("status-v2 store", () => {
 
     writeStatusSnapshot(dir, snapshot());
     expect(readStatusSnapshot(dir)).toEqual({ available: true, status: snapshot() });
+    // The temp file was renamed over the target, not left as debris — a reader
+    // never sees a half-written file (the whole point of the temp+rename).
+    expect(readdirSync(dir)).toEqual([STATUS_SNAPSHOT_FILE]);
 
     writeFileSync(statusSnapshotPath(dir), "{");
     expect(readStatusSnapshot(dir)).toMatchObject({

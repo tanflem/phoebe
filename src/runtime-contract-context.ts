@@ -13,6 +13,7 @@ export type RuntimeContractContext = {
   provider: WorkOutcomeEvent["provider"];
   verificationCommands: readonly string[];
   quarantinedEngineSha?: string;
+  secrets: readonly string[];
 };
 
 function promptDigest(config: PhoebeConfig, runtimeRoot: string): string {
@@ -84,6 +85,10 @@ export function buildRuntimeContractContext(options: {
       options.config.checkCommand,
       options.config.testCommand,
       options.config.readyCommand,
+    ],
+    secrets: [
+      env["GH_TOKEN"] ?? "",
+      ...Object.values(options.config.providerEnv).map((name) => env[name] ?? ""),
     ],
     ...(env["PHOEBE_QUARANTINED_ENGINE_SHA"]
       ? { quarantinedEngineSha: env["PHOEBE_QUARANTINED_ENGINE_SHA"] }

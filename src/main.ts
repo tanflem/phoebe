@@ -42,12 +42,6 @@ import {
   resolveLeaseTtlMs,
 } from "./claim-lease.ts";
 import {
-  createEmitUnitEvent,
-  STATUS_FILE,
-  type EmitUnitEvent,
-  type UnitRef,
-} from "./unit-event.ts";
-import {
   buildQuarantineComment,
   buildUnitAttemptMarker,
   buildUnitTimeoutMarker,
@@ -58,7 +52,6 @@ import {
   resolveMaxUnitAttempts,
   resolveMaxUnitTimeouts,
 } from "./quarantine.ts";
-import { join } from "node:path";
 import {
   EXECUTION_REFUSED_MESSAGE,
   executionDecision,
@@ -86,6 +79,7 @@ import {
 } from "./prompt.ts";
 import { buildRuntimeContractContext } from "./runtime-contract-context.ts";
 import { createRuntimeStatusReporter, type RuntimeStatusTransition } from "./runtime-status.ts";
+import { workIdentityId } from "./status-contract.ts";
 import {
   readVerificationReport,
   removeVerificationReport,
@@ -642,9 +636,14 @@ function addQuarantineLabel(isIssueKind: boolean, id: string): void {
  * Best-effort — a GitHub write failure here is logged and swallowed so it can
  * never take the daemon down (the timeout itself is already recorded).
  */
-function recordUnitTimeout(picked: WorkUnit, phoebeLogin: string, emit: EmitUnitEvent): void {
-  const ref = unitRef(picked);
+function recordUnitTimeout(
+  picked: WorkUnit,
+  phoebeLogin: string,
+  status: ReturnType<typeof createRuntimeStatusReporter>,
+): void {
+  const work = workIdentity(picked);
   const isIssueKind = picked.kind === "issues" || picked.kind === "research";
+  const id = String(workIdentityId(work));
   try {
     // `data.phoebeLogin` is only populated when the `reviews` kind was fetched
     // this cycle, but any kind can time out — resolve it directly when absent so
@@ -654,37 +653,37 @@ function recordUnitTimeout(picked: WorkUnit, phoebeLogin: string, emit: EmitUnit
     const login = phoebeLogin || phoebeGhLogin();
     const k = resolveMaxUnitTimeouts(process.env, config.maxUnitTimeouts);
     const inputs = isIssueKind
-      ? fetchIssueTimeoutInputs(Number(ref.id))
-      : fetchPrTimeoutInputs(asPrNumber(Number(ref.id)));
+      ? fetchIssueTimeoutInputs(Number(id))
+      : fetchPrTimeoutInputs(asPrNumber(Number(id)));
     const { count, quarantine } = decideTimeoutRecord({
       comments: inputs.comments,
       phoebeLogin: login,
       extraActivityAt: inputs.extraActivityAt,
       k,
     });
-    postUnitComment(isIssueKind, ref.id, buildUnitTimeoutMarker(count));
+    postUnitComment(isIssueKind, id, buildUnitTimeoutMarker(count));
     if (quarantine) {
-      addQuarantineLabel(isIssueKind, ref.id);
+      addQuarantineLabel(isIssueKind, id);
       postUnitComment(
         isIssueKind,
-        ref.id,
+        id,
         buildQuarantineComment({
-          kind: ref.kind,
-          id: Number(ref.id),
+          kind: picked.kind,
+          id: Number(id),
           k: count,
           baseline: inputs.baseline,
           reason: "timed out",
         }),
       );
-      emit({
-        unit: ref,
-        event: "quarantined",
-        detail: `timed out ${count}× — labelled ${PHOEBE_QUARANTINE_LABEL}`,
+      status.record({
+        kind: "unit-quarantined",
+        work,
+        reason: `timed out ${count}× — labelled ${PHOEBE_QUARANTINE_LABEL}`,
       });
     }
   } catch (error) {
     phoebeError(
-      `Could not record timeout toward quarantine for ${ref.kind} #${ref.id} — ` +
+      `Could not record timeout toward quarantine for ${picked.kind} #${id} — ` +
         `${error instanceof Error ? error.message : String(error)}`,
     );
   }
@@ -2309,23 +2308,26 @@ async function fetchCycleWorkData(kinds: readonly WorkKindName[]): Promise<Cycle
   };
 }
 
+/**
+ * Diagnose why a cycle picked no unit and return the reason `record({kind:
+ * "idle"})` both prints (tagged, once) and persists — this stays free of its
+ * own `phoebeLog(reason)` so the reason is never printed twice (#60). The
+ * per-kind skip-count diagnostics below it are distinct information, not a
+ * restatement of `reason`, so they keep logging directly.
+ */
 function logIdleCycle(data: CycleWorkData): string {
   const phoebeBase = process.env["PHOEBE_BASE"];
   if (
     data.issues.length > 0 &&
     !selectIssue(data.issues, data.blockerStates, phoebeBase, data.nativeBlockersByIssue)
   ) {
-    const reason = `${data.issues.length} ${config.issueSource.readyLabel} issue(s) but none workable this cycle (blocked or waiting on blocker PR).`;
-    phoebeLog(reason);
-    return reason;
+    return `${data.issues.length} ${config.issueSource.readyLabel} issue(s) but none workable this cycle (blocked or waiting on blocker PR).`;
   }
   if (
     data.researchIssues.length > 0 &&
     !selectIssue(data.researchIssues, data.blockerStates, phoebeBase, data.nativeBlockersByIssue)
   ) {
-    const reason = `${data.researchIssues.length} ${config.researchLabel} ticket(s) but none workable this cycle (blocked or waiting on blocker PR).`;
-    phoebeLog(reason);
-    return reason;
+    return `${data.researchIssues.length} ${config.researchLabel} ticket(s) but none workable this cycle (blocked or waiting on blocker PR).`;
   }
   const stack: StackContext = { issueBodies: data.issueBodies, blockerStates: data.blockerStates };
   if (data.conflictingPrs.length > 0) {
@@ -2344,9 +2346,7 @@ function logIdleCycle(data: CycleWorkData): string {
       phoebeLog(`${skippedWatermark} conflicting PR(s) skipped (unchanged failure watermark).`);
     }
     if (!unit) {
-      const reason = `${data.conflictingPrs.length} conflicting PR(s) but none fixable this cycle.`;
-      phoebeLog(reason);
-      return reason;
+      return `${data.conflictingPrs.length} conflicting PR(s) but none fixable this cycle.`;
     }
   }
   if (data.failingCheckPrs.length > 0) {
@@ -2355,9 +2355,7 @@ function logIdleCycle(data: CycleWorkData): string {
       phoebeLog(`${skipped} failing-CI PR(s) skipped (conflicting, stacked, or watermarked).`);
     }
     if (!unit) {
-      const reason = `${data.failingCheckPrs.length} failing-CI PR(s) but none fixable this cycle.`;
-      phoebeLog(reason);
-      return reason;
+      return `${data.failingCheckPrs.length} failing-CI PR(s) but none fixable this cycle.`;
     }
   }
   if (data.reviewActivityPrs.length > 0 && data.phoebeLogin) {
@@ -2372,26 +2370,14 @@ function logIdleCycle(data: CycleWorkData): string {
       );
     }
     if (!unit) {
-      const reason = `${data.reviewActivityPrs.length} review-feedback PR(s) but none fixable this cycle.`;
-      phoebeLog(reason);
-      return reason;
+      return `${data.reviewActivityPrs.length} review-feedback PR(s) but none fixable this cycle.`;
     }
   }
-  const reason = "No work this cycle — idle.";
-  phoebeLog(reason);
-  return reason;
+  return "No work this cycle — idle.";
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** The observability identity of a picked unit: (kind, id) (#73/#75). */
-function unitRef(picked: WorkUnit): UnitRef {
-  if (picked.kind === "issues" || picked.kind === "research") {
-    return { kind: picked.kind, id: String(picked.unit.issue.number) };
-  }
-  return { kind: picked.kind, id: String(picked.unit.prNumber) };
 }
 
 function describeUnit(picked: WorkUnit): string {
@@ -2415,7 +2401,13 @@ function describeUnit(picked: WorkUnit): string {
   return `issue #${unit.issue.number} — base ${unit.resolution.worktreeBase}`;
 }
 
-function statusWork(
+/**
+ * The observability identity of a picked unit (#60/#73/#75): the same
+ * `(kind, issueNumber?, pullRequestNumber?, branch?)` projection feeds
+ * `work-started` and `unit-quarantined` alike, and `workIdentityId` (#59's
+ * renderer) derives the log line's `#<id>` from it by one rule.
+ */
+function workIdentity(
   picked: WorkUnit,
 ): Extract<RuntimeStatusTransition, { kind: "work-started" }>["work"] {
   if (picked.kind === "conflicts" || picked.kind === "checks" || picked.kind === "reviews") {
@@ -2492,10 +2484,6 @@ export async function runEngine(argv: readonly string[] = process.argv.slice(2))
     ...(inContainer ? { stateDir: config.paths.stateDir } : {}),
     ...(process.env["PHOEBE_RUNTIME_ID"] ? { runtimeId: process.env["PHOEBE_RUNTIME_ID"] } : {}),
     ...contractContext,
-    secrets: [
-      process.env["GH_TOKEN"] ?? "",
-      ...Object.values(config.providerEnv).map((name) => process.env[name] ?? ""),
-    ],
     onWriteError: (error) =>
       phoebeError(
         `Runtime telemetry write failed — ${
@@ -2553,19 +2541,10 @@ export async function runEngine(argv: readonly string[] = process.argv.slice(2))
     connected: process.connected,
   });
 
-  // Per-repo observability (#73): one tagged `[phoebe:<slug>]` line per unit
-  // event + a `status.json` snapshot in this tenant's state dir, which
-  // `phoebe list` reads. The emitter swallows snapshot-write failures, so it is
-  // harmless on the host (where the derived state dir may be unwritable).
-  const emitUnitEvent = createEmitUnitEvent({
-    tenant: config.repoSlug,
-    statusPath: join(config.paths.stateDir, STATUS_FILE),
-  });
-
   const drain = installDrainSignal(process, ["SIGTERM", REF_CHANGE_DRAIN_SIGNAL]);
   let failed = false;
   try {
-    await runLoop({ runOnce, dryRun, pollIntervalMs, drain, status, slotClient, emitUnitEvent });
+    await runLoop({ runOnce, dryRun, pollIntervalMs, drain, status, slotClient });
   } catch (error) {
     failed = true;
     status.record({ kind: "engine-failed", error });
@@ -2595,7 +2574,6 @@ async function runLoop({
   drain,
   status,
   slotClient,
-  emitUnitEvent,
 }: {
   runOnce: boolean;
   dryRun: boolean;
@@ -2603,11 +2581,9 @@ async function runLoop({
   drain: DrainSignal;
   status: ReturnType<typeof createRuntimeStatusReporter>;
   slotClient: SlotClient | null;
-  emitUnitEvent: EmitUnitEvent;
 }): Promise<void> {
   while (true) {
     if (drain.requested) {
-      phoebeLog("Drain requested — starting no new work unit; exiting 0.");
       status.record({
         kind: "draining",
         reason: drainReason(drain, "starting no new work unit."),
@@ -2659,12 +2635,10 @@ async function runLoop({
     );
 
     if (!picked) {
-      if (runOnce) {
-        phoebeLog(RUN_ONCE_NOTHING_MESSAGE);
-        status.record({ kind: "idle", reason: RUN_ONCE_NOTHING_MESSAGE });
-      } else {
-        status.record({ kind: "idle", reason: logIdleCycle(data) });
-      }
+      status.record({
+        kind: "idle",
+        reason: runOnce ? RUN_ONCE_NOTHING_MESSAGE : logIdleCycle(data),
+      });
       if (runOnce || dryRun) break;
       // Interruptible idle poll — a SIGTERM mid-sleep wakes it, the next
       // iteration's drain check breaks, and shutdown does not wait a full cycle.
@@ -2676,7 +2650,6 @@ async function runLoop({
     // freshly-picked unit start — "start no new one". The in-flight unit (if any)
     // already finished before we looped back here, so exit now.
     if (drain.requested) {
-      phoebeLog("Drain requested before starting the next unit — exiting 0.");
       status.record({
         kind: "draining",
         reason: drainReason(drain, "starting no new work unit."),
@@ -2686,13 +2659,10 @@ async function runLoop({
 
     const decision = executionDecision({ dryRun, inContainer });
     if (decision === "dry-run") {
-      const reason = `Would execute: ${describeUnit(picked)}.`;
-      phoebeLog(reason);
-      status.record({ kind: "idle", reason });
+      status.record({ kind: "idle", reason: `Would execute: ${describeUnit(picked)}.` });
       break;
     }
     if (decision === "refuse") {
-      phoebeError(EXECUTION_REFUSED_MESSAGE);
       status.record({ kind: "engine-failed", error: EXECUTION_REFUSED_MESSAGE });
       process.exit(1);
     }
@@ -2716,9 +2686,7 @@ async function runLoop({
         throw error;
       }
     }
-    const ref = unitRef(picked);
-    status.record({ kind: "work-started", work: statusWork(picked) });
-    emitUnitEvent({ unit: ref, event: "started" });
+    status.record({ kind: "work-started", work: workIdentity(picked) });
     try {
       const { exitCode: agentExitCode, verification } = await KINDS[picked.kind].runUnit(
         picked.unit,
@@ -2757,30 +2725,20 @@ async function runLoop({
               }),
         });
       }
-      emitUnitEvent({ unit: ref, event: "completed" });
     } catch (error) {
-      status.record({ kind: "work-failed", error });
       if (error instanceof RunTimeoutError) {
         // A whole-unit timeout (#72): the agent was killed, the slot releases in
         // `finally`, and the engine survives (never told to the supervisor, #60
         // orthogonality). #75 layers the poison-unit quarantine on this event.
-        emitUnitEvent({
-          unit: ref,
-          event: "timed-out",
-          detail: `${Math.round(error.elapsedMs / 1000)}s budget exceeded`,
-        });
+        status.record({ kind: "work-timed-out", elapsedMs: error.elapsedMs });
         // Count this timeout on the unit and, at K consecutive, quarantine it so
         // a genuinely poisonous unit stops being re-picked forever (#75).
-        recordUnitTimeout(picked, data.phoebeLogin ?? "", emitUnitEvent);
+        recordUnitTimeout(picked, data.phoebeLogin ?? "", status);
       } else {
         // A non-timeout failure: clear the current unit and record the error so
         // `phoebe list` shows it (the durable record is still the per-work-kind
         // watermark/failure-comment on GitHub; this is the at-a-glance snapshot).
-        emitUnitEvent({
-          unit: ref,
-          event: "failed",
-          detail: error instanceof Error ? error.message : String(error),
-        });
+        status.record({ kind: "work-failed", error });
       }
       if (runOnce) {
         throw error;
@@ -2800,7 +2758,6 @@ async function runLoop({
     // Drain requested while the unit ran: it is finished, so exit now rather
     // than picking up another. This is the graceful-drain boundary.
     if (drain.requested) {
-      phoebeLog("Finished the in-flight unit under drain — exiting 0.");
       status.record({
         kind: "draining",
         reason: drainReason(drain, "the in-flight unit finished."),

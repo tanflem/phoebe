@@ -205,6 +205,175 @@ describe("runtime status projection", () => {
     });
   });
 
+  test("prints exactly one tagged [phoebe:<slug>] line per transition, in the unit-event grammar (#60)", () => {
+    const lines: string[] = [];
+    const reporter = createRuntimeStatusReporter({
+      ...context,
+      runtimeId: "runtime-1",
+      log: (line) => lines.push(line),
+    });
+
+    reporter.record({ kind: "selecting" });
+    expect(lines).toEqual([]);
+
+    reporter.record({
+      kind: "work-started",
+      work: { kind: "issues", issueNumber: 42, branch: "phoebe/issue-42" },
+    });
+    expect(lines.at(-1)).toBe("[phoebe:owner/repo] started issues #42");
+
+    reporter.record({ kind: "work-completed" });
+    expect(lines.at(-1)).toBe("[phoebe:owner/repo] completed issues #42");
+
+    reporter.record({ kind: "work-started", work: { kind: "checks", pullRequestNumber: 9 } });
+    reporter.record({ kind: "work-failed", error: new Error("boom") });
+    expect(lines.at(-1)).toBe("[phoebe:owner/repo] failed checks #9 — boom");
+
+    reporter.record({ kind: "work-started", work: { kind: "checks", pullRequestNumber: 9 } });
+    reporter.record({ kind: "work-timed-out", elapsedMs: 45_000 });
+    expect(lines.at(-1)).toBe(
+      "[phoebe:owner/repo] timed-out checks #9 — Work unit exceeded its 45s wall-clock budget and was aborted.",
+    );
+
+    reporter.record({
+      kind: "unit-quarantined",
+      work: { kind: "checks", pullRequestNumber: 9 },
+      reason: "timed out 3× — labelled phoebe:quarantined",
+    });
+    expect(lines.at(-1)).toBe(
+      "[phoebe:owner/repo] quarantined checks #9 — timed out 3× — labelled phoebe:quarantined",
+    );
+
+    // Never the bare, un-attributable `[phoebe]` prefix.
+    expect(lines.every((line) => line.startsWith("[phoebe:owner/repo]"))).toBe(true);
+  });
+
+  test("selecting emits no line; every other transition emits exactly one (#60)", () => {
+    const lines: string[] = [];
+    const reporter = createRuntimeStatusReporter({
+      ...context,
+      runtimeId: "runtime-1",
+      log: (line) => lines.push(line),
+    });
+
+    reporter.record({ kind: "selecting" });
+    expect(lines).toHaveLength(0);
+
+    reporter.record({ kind: "idle", reason: "nothing to do" });
+    expect(lines).toHaveLength(1);
+
+    reporter.record({ kind: "work-started", work: { kind: "issues", issueNumber: 1 } });
+    expect(lines).toHaveLength(2);
+
+    reporter.record({ kind: "work-completed" });
+    expect(lines).toHaveLength(3);
+
+    reporter.record({ kind: "work-started", work: { kind: "issues", issueNumber: 1 } });
+    expect(lines).toHaveLength(4);
+
+    reporter.record({ kind: "work-failed", error: new Error("boom") });
+    expect(lines).toHaveLength(5);
+
+    reporter.record({ kind: "work-started", work: { kind: "issues", issueNumber: 1 } });
+    expect(lines).toHaveLength(6);
+
+    reporter.record({ kind: "work-timed-out", elapsedMs: 1_000 });
+    expect(lines).toHaveLength(7);
+
+    reporter.record({
+      kind: "unit-quarantined",
+      work: { kind: "issues", issueNumber: 1 },
+      reason: "poisonous",
+    });
+    expect(lines).toHaveLength(8);
+
+    reporter.record({ kind: "backoff", reason: "quota" });
+    expect(lines).toHaveLength(9);
+
+    reporter.record({ kind: "draining", reason: "stop" });
+    expect(lines).toHaveLength(10);
+
+    reporter.record({ kind: "engine-failed", error: new Error("dead") });
+    expect(lines).toHaveLength(11);
+
+    reporter.record({ kind: "stopped" });
+    expect(lines).toHaveLength(12);
+
+    reporter.record({ kind: "selecting" });
+    expect(lines).toHaveLength(12);
+  });
+
+  test("work-timed-out clears activeWork, records an agent-category failure, and bumps retry (#60)", () => {
+    const stateDir = makeStateDir();
+    const reporter = createRuntimeStatusReporter({
+      stateDir,
+      runtimeId: "runtime-1",
+      ...context,
+    });
+    reporter.record({ kind: "work-started", work: { kind: "checks", pullRequestNumber: 9 } });
+    reporter.record({ kind: "work-timed-out", elapsedMs: 45_000 });
+
+    expect(reporter.snapshot()).toMatchObject({
+      activeWork: null,
+      lifecycle: { state: "failed" },
+      lastFailure: { outcome: "agent-failure", failureCategory: "agent" },
+      control: { retry: { attempt: 1 } },
+    });
+    expect(replayEventJournal(stateDir).events[0]).toMatchObject({
+      outcome: "agent-failure",
+      failure: { category: "agent", retryable: true },
+      resources: { summary: "Work unit exceeded its 45s wall-clock budget and was aborted." },
+    });
+  });
+
+  test("unit-quarantined logs the unit's tagged line without mutating the snapshot beyond updatedAt (#60)", () => {
+    const stateDir = makeStateDir();
+    const reporter = createRuntimeStatusReporter({ stateDir, runtimeId: "runtime-1", ...context });
+    reporter.record({ kind: "work-started", work: { kind: "issues", issueNumber: 42 } });
+    reporter.record({ kind: "work-timed-out", elapsedMs: 1_000 });
+    const before = reporter.snapshot();
+
+    reporter.record({
+      kind: "unit-quarantined",
+      work: { kind: "issues", issueNumber: 42 },
+      reason: "timed out 3× — labelled phoebe:quarantined",
+    });
+
+    const after = reporter.snapshot();
+    expect(after).toEqual({ ...before, updatedAt: after.updatedAt });
+    expect(after.control.quarantine).toEqual({ active: false });
+  });
+
+  test("a nonzero agent exit is recorded as exactly one failed outcome — never also completed (#60 regression)", () => {
+    const stateDir = makeStateDir();
+    const lines: string[] = [];
+    const reporter = createRuntimeStatusReporter({
+      stateDir,
+      runtimeId: "runtime-1",
+      ...context,
+      log: (line) => lines.push(line),
+    });
+    reporter.record({ kind: "work-started", work: { kind: "issues", issueNumber: 42 } });
+    lines.length = 0;
+
+    reporter.record({
+      kind: "work-failed",
+      error: new Error("Agent exited with code 1."),
+      resources: {
+        agentExitCode: 1,
+        summary: "The work unit completed its cleanup after a nonzero agent exit.",
+      },
+    });
+
+    expect(lines).toEqual(["[phoebe:owner/repo] failed issues #42 — Agent exited with code 1."]);
+    expect(reporter.snapshot()).toMatchObject({
+      lifecycle: { state: "failed" },
+      activeWork: null,
+      lastSuccess: null,
+    });
+    expect(replayEventJournal(stateDir).events.at(-1)).toMatchObject({ outcome: "agent-failure" });
+  });
+
   test("projects graceful drain and crash-loop quarantine without exposing secrets", () => {
     const reporter = createRuntimeStatusReporter({
       ...context,

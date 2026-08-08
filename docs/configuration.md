@@ -161,7 +161,7 @@ before this field existed. Set it and the split is:
   dependencies API), label transitions (`readyLabel` ↔ `processingLabel`),
   claim/release comments, and the `research` kind's ticket queue.
 - **Work target** (`repoSlug`) — clone, worktree, branch, PR, and status
-  identity (`phoebe status`, `unit-event` tenant tag) are unaffected.
+  identity (`phoebe status`, the `[phoebe:<slug>]` tenant tag) are unaffected.
 
 `researchLabel` and `processingLabel` are not split — they stay on the
 tenant's top-level fields but apply to issues on `issueSource.repoSlug` once

@@ -2,9 +2,9 @@
 // line the engine's stdout/stderr streams carry a tenant slug —
 // `[phoebe:<slug>]` — never the bare, un-attributable `[phoebe]` a host log
 // collector multiplexing several repos onto one container's stdout cannot
-// resolve back to a repo. `unit-event.ts` already asserts this for the event
-// rail's own four call sites; this sweeps the rest of the engine so a bare
-// prefix reintroduced anywhere is a test failure, not a silent regression.
+// resolve back to a repo. `runtime-status.ts` already asserts this for the
+// event rail's own transitions (#60); this sweeps the rest of the engine so a
+// bare prefix reintroduced anywhere is a test failure, not a silent regression.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -35,7 +35,7 @@ function walkSourceFiles(dir: string): string[] {
 }
 
 // Drops comment lines so prose that merely *discusses* the bare tag (like this
-// file's own header, or unit-event.ts's design note) doesn't trip the check.
+// file's own header, or runtime-status.ts's design notes) doesn't trip the check.
 function nonCommentLines(source: string): string[] {
   return source.split("\n").filter((line) => {
     const trimmed = line.trim();

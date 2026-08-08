@@ -33,13 +33,16 @@ export type WorkIdentity = {
 
 const PR_KEYED_WORK_KINDS: ReadonlySet<WorkKind> = new Set(["conflicts", "checks", "reviews"]);
 
+/** The subset of `WorkIdentity` the `#<id>` rule actually reads. */
+export type WorkKindRef = Pick<WorkIdentity, "kind" | "issueNumber" | "pullRequestNumber">;
+
 /**
- * The `#<id>` a `WorkIdentity` is known by: `pullRequestNumber` for the
- * PR-keyed kinds (conflicts/checks/reviews), `issueNumber` for the
- * issue-keyed kinds (issues/research) — the same rule `unitRef` (main.ts)
- * applies to a picked `WorkUnit` before it becomes a `WorkIdentity`.
+ * The `#<id>` a work unit is known by: `pullRequestNumber` for the PR-keyed
+ * kinds (conflicts/checks/reviews), `issueNumber` for the issue-keyed kinds
+ * (issues/research) — the same rule `workIdentity` (main.ts) applies to a
+ * picked `WorkUnit` before it becomes a `WorkIdentity`.
  */
-export function workIdentityId(work: WorkIdentity): number | undefined {
+export function workIdentityId(work: WorkKindRef): number | undefined {
   return PR_KEYED_WORK_KINDS.has(work.kind) ? work.pullRequestNumber : work.issueNumber;
 }
 

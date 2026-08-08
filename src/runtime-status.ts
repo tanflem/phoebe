@@ -1,14 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { createEventJournal, replayEventJournal, type WorkOutcomeInput } from "./event-journal.ts";
+import { unitTag } from "./phoebe-log.ts";
 import {
   EVENTS_SCHEMA_VERSION,
   STATUS_SCHEMA_VERSION,
+  workIdentityId,
   type FailureCategory,
   type NormalizedOutcome,
   type QueueEntry,
   type StatusSnapshot,
   type WorkIdentity,
   type WorkKind,
+  type WorkKindRef,
   type WorkOutcomeEvent,
 } from "./status-contract.ts";
 import { loadOrCreateRuntimeId, readStatusSnapshot, writeStatusSnapshot } from "./status-store.ts";
@@ -22,19 +25,18 @@ const CAPABILITIES = [
 
 type VerificationResult = WorkOutcomeEvent["verification"][number];
 
+/** The work a `work-started`/`unit-quarantined` transition identifies (#60). */
+type WorkRef = {
+  kind: WorkKind;
+  issueNumber?: number;
+  pullRequestNumber?: number;
+  branch?: string;
+};
+
 export type RuntimeStatusTransition =
   | { kind: "selecting" }
   | { kind: "idle"; reason: string }
-  | {
-      kind: "work-started";
-      work: {
-        workId?: string;
-        kind: WorkKind;
-        issueNumber?: number;
-        pullRequestNumber?: number;
-        branch?: string;
-      };
-    }
+  | { kind: "work-started"; work: WorkRef & { workId?: string } }
   | {
       kind: "work-completed";
       verification?: readonly VerificationResult[];
@@ -48,6 +50,8 @@ export type RuntimeStatusTransition =
       verification?: readonly VerificationResult[];
       resources?: { agentExitCode?: number; summary?: string };
     }
+  | { kind: "work-timed-out"; elapsedMs: number }
+  | { kind: "unit-quarantined"; work: WorkRef; reason: string }
   | { kind: "backoff"; reason: string; until?: string }
   | { kind: "draining"; reason: string }
   | { kind: "engine-failed"; error: unknown }
@@ -56,6 +60,11 @@ export type RuntimeStatusTransition =
 type EventJournalWriter = {
   append: (input: WorkOutcomeInput) => WorkOutcomeEvent;
 };
+
+/** The `#<id>` an already-tagged log line renders — falls back to `workId` when a unit is unnumbered. */
+function workRefLabel(work: WorkKindRef & { workId?: string }): string {
+  return String(workIdentityId(work) ?? work.workId);
+}
 
 export function sanitizeTelemetryText(
   value: unknown,
@@ -139,6 +148,7 @@ export function createRuntimeStatusReporter(options: {
   secrets?: readonly string[];
   now?: () => Date;
   randomId?: () => string;
+  log?: (line: string) => void;
   eventJournal?: EventJournalWriter;
   writeSnapshot?: (stateDir: string, snapshot: StatusSnapshot) => void;
   onWriteError?: (error: unknown) => void;
@@ -149,6 +159,8 @@ export function createRuntimeStatusReporter(options: {
 } {
   const now = options.now ?? (() => new Date());
   const randomId = options.randomId ?? randomUUID;
+  const log = options.log ?? ((line: string) => console.log(line));
+  const tag = unitTag(options.repository.slug);
   const startedAt = now().toISOString();
   const runtimeId = options.stateDir
     ? loadOrCreateRuntimeId(options.stateDir, {
@@ -249,16 +261,17 @@ export function createRuntimeStatusReporter(options: {
     at: string,
     outcome: NormalizedOutcome,
     failure: WorkOutcomeEvent["failure"],
-    transition:
-      | Extract<RuntimeStatusTransition, { kind: "work-completed" }>
-      | Extract<RuntimeStatusTransition, { kind: "work-failed" }>,
+    extra: {
+      verification?: readonly VerificationResult[];
+      resources?: { agentExitCode?: number; summary?: string };
+    },
   ): void => {
     const active = snapshot.activeWork;
     if (!active || !eventJournal) return;
     const started = Date.parse(active.startedAt);
     const ended = Date.parse(at);
     const verification = (
-      transition.verification ??
+      extra.verification ??
       options.verificationCommands.map((command) => ({
         command,
         status: "unknown" as const,
@@ -294,11 +307,11 @@ export function createRuntimeStatusReporter(options: {
       resources: {
         durationMs:
           Number.isFinite(started) && Number.isFinite(ended) ? Math.max(0, ended - started) : 0,
-        ...(transition.resources?.agentExitCode !== undefined
-          ? { agentExitCode: transition.resources.agentExitCode }
+        ...(extra.resources?.agentExitCode !== undefined
+          ? { agentExitCode: extra.resources.agentExitCode }
           : {}),
         summary: sanitizeTelemetryText(
-          transition.resources?.summary ??
+          extra.resources?.summary ??
             (outcome === "success" ? "Work unit completed." : "Work unit failed."),
           options.secrets,
         ),
@@ -330,18 +343,24 @@ export function createRuntimeStatusReporter(options: {
   const record = (transition: RuntimeStatusTransition): StatusSnapshot => {
     const at = now().toISOString();
     snapshot.updatedAt = at;
+    // Every transition prints at most one tagged line — the volume the
+    // multiplexed-container rail (#73/#60) exists to bound. `selecting` alone
+    // yields `null`: one per poll cycle per tenant is exactly the noise floor
+    // that rail was built to avoid.
+    let line: string | null;
     switch (transition.kind) {
       case "selecting":
         snapshot.lifecycle = { state: "selecting" };
         snapshot.control.backoff = { active: false };
+        line = null;
         break;
-      case "idle":
-        snapshot.lifecycle = {
-          state: "idle",
-          reason: sanitizeTelemetryText(transition.reason, options.secrets),
-        };
+      case "idle": {
+        const reason = sanitizeTelemetryText(transition.reason, options.secrets);
+        snapshot.lifecycle = { state: "idle", reason };
         snapshot.activeWork = null;
+        line = `${tag} ${reason}`;
         break;
+      }
       case "work-started": {
         const work: WorkIdentity = {
           workId: transition.work.workId ?? randomId(),
@@ -369,16 +388,21 @@ export function createRuntimeStatusReporter(options: {
             ? { branch: `${repositoryLink}/tree/${encodeURIComponent(work.branch)}` }
             : {}),
         };
+        line = `${tag} started ${work.kind} #${workRefLabel(work)}`;
         break;
       }
-      case "work-completed":
+      case "work-completed": {
+        const work = snapshot.activeWork;
         attachPullRequest(transition.pullRequestNumber);
         applyEvent(at, "success", null, transition);
         snapshot.lifecycle = { state: "selecting" };
         snapshot.activeWork = null;
         snapshot.control.retry = { attempt: 0 };
+        line = work ? `${tag} completed ${work.kind} #${workRefLabel(work)}` : null;
         break;
+      }
       case "work-failed": {
+        const work = snapshot.activeWork;
         attachPullRequest(transition.pullRequestNumber);
         const message = sanitizeTelemetryText(transition.error, options.secrets);
         const classified = classifyFailure(message);
@@ -398,37 +422,66 @@ export function createRuntimeStatusReporter(options: {
         if (classified.outcome === "quota-backoff") {
           snapshot.control.backoff = { active: true, reason: message };
         }
+        line = work ? `${tag} failed ${work.kind} #${workRefLabel(work)} — ${message}` : null;
         break;
       }
-      case "backoff":
-        snapshot.lifecycle = {
-          state: "idle",
-          reason: sanitizeTelemetryText(transition.reason, options.secrets),
-        };
+      case "work-timed-out": {
+        const work = snapshot.activeWork;
+        const seconds = Math.round(transition.elapsedMs / 1_000);
+        const summary = `Work unit exceeded its ${seconds}s wall-clock budget and was aborted.`;
+        applyEvent(
+          at,
+          "agent-failure",
+          { category: "agent", summary, retryable: true },
+          { resources: { summary } },
+        );
+        snapshot.lifecycle = { state: "failed", reason: summary };
+        snapshot.activeWork = null;
+        snapshot.control.retry = { attempt: snapshot.control.retry.attempt + 1 };
+        line = work ? `${tag} timed-out ${work.kind} #${workRefLabel(work)} — ${summary}` : null;
+        break;
+      }
+      case "unit-quarantined": {
+        // Log-only (#75/#60): the durable quarantine record is the GitHub
+        // marker/label on the unit itself, not this ephemeral snapshot — so
+        // beyond `updatedAt` (set above for every transition), nothing here
+        // mutates `snapshot`. It fires after `activeWork` is already cleared,
+        // so the unit is carried explicitly rather than read off `activeWork`.
+        const reason = sanitizeTelemetryText(transition.reason, options.secrets);
+        line = `${tag} quarantined ${transition.work.kind} #${workRefLabel(transition.work)} — ${reason}`;
+        break;
+      }
+      case "backoff": {
+        const reason = sanitizeTelemetryText(transition.reason, options.secrets);
+        snapshot.lifecycle = { state: "idle", reason };
         snapshot.control.backoff = {
           active: true,
-          reason: sanitizeTelemetryText(transition.reason, options.secrets),
+          reason,
           ...(transition.until ? { until: transition.until } : {}),
         };
+        line = `${tag} ${reason}`;
         break;
-      case "draining":
-        snapshot.lifecycle = {
-          state: "draining",
-          reason: sanitizeTelemetryText(transition.reason, options.secrets),
-        };
+      }
+      case "draining": {
+        const reason = sanitizeTelemetryText(transition.reason, options.secrets);
+        snapshot.lifecycle = { state: "draining", reason };
         snapshot.control.drain = { requested: true, requestedAt: at };
+        line = `${tag} ${reason}`;
         break;
-      case "engine-failed":
-        snapshot.lifecycle = {
-          state: "failed",
-          reason: sanitizeTelemetryText(transition.error, options.secrets),
-        };
+      }
+      case "engine-failed": {
+        const reason = sanitizeTelemetryText(transition.error, options.secrets);
+        snapshot.lifecycle = { state: "failed", reason };
+        line = `${tag} ${reason}`;
         break;
+      }
       case "stopped":
         snapshot.lifecycle = { state: "stopped" };
         snapshot.activeWork = null;
+        line = `${tag} stopped`;
         break;
     }
+    if (line !== null) log(line);
     persist(at);
     return snapshot;
   };
