@@ -35,6 +35,7 @@ import { RunTimeoutError, resolveRunTimeoutMs, runWithDeadline } from "./run-tim
 import {
   buildLeaseComment,
   buildReclaimComment,
+  claimIssueLabels,
   leaseHeartbeatIntervalMs,
   parseLeaseMarker,
   reclaimDecision,
@@ -1047,6 +1048,11 @@ function verificationReportPath(worktreeDir: string): string {
  * Claim an issue (#15): post the lease marker comment *before* flipping the
  * label, so `processingLabel` present always implies a durable claim marker
  * exists — never the reverse race (a label with no marker to reclaim by).
+ *
+ * The label flip itself is add-processingLabel-then-remove-readyLabel, as two
+ * explicit calls (#81) rather than one combined `gh issue edit`, so a failure
+ * between them leaves both labels — recoverable by the reclaim sweep — rather
+ * than neither, which nothing can find.
  */
 function claimIssueLease(opts: {
   issueNumber: number;
@@ -1063,18 +1069,14 @@ function claimIssueLease(opts: {
       branch: opts.branch,
     }),
   );
-  gh(
-    [
-      "issue",
-      "edit",
-      String(opts.issueNumber),
-      "--add-label",
-      config.processingLabel,
-      "--remove-label",
-      config.issueSource.readyLabel,
-    ],
-    undefined,
-    config.issueSource.repoSlug,
+  claimIssueLabels(
+    {
+      issueNumber: opts.issueNumber,
+      processingLabel: config.processingLabel,
+      readyLabel: config.issueSource.readyLabel,
+      repoSlug: config.issueSource.repoSlug,
+    },
+    gh,
   );
 }
 

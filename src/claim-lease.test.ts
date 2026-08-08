@@ -7,11 +7,13 @@ import {
   buildLeaseComment,
   buildLeaseMarker,
   buildReclaimComment,
+  claimIssueLabels,
   DEFAULT_LEASE_TTL_MS,
   leaseHeartbeatIntervalMs,
   parseLeaseMarker,
   reclaimDecision,
   resolveLeaseTtlMs,
+  type GhRunner,
   type LeaseMarker,
 } from "./claim-lease.ts";
 
@@ -65,6 +67,81 @@ describe("lease marker", () => {
     expect(buildReclaimComment("expired")).toContain("stale");
     expect(buildReclaimComment("own-restart")).toContain("restarted");
     expect(buildReclaimComment("no-lease")).toContain("no lease marker");
+  });
+});
+
+describe("claimIssueLabels (#81)", () => {
+  /** A fake `gh` that mutates an in-memory label set instead of shelling out. */
+  function fakeLabelGh(
+    labels: Set<string>,
+    opts?: { failOn?: "add" | "remove" },
+  ): { runner: GhRunner; calls: string[][] } {
+    const calls: string[][] = [];
+    const runner: GhRunner = (args) => {
+      calls.push(args);
+      if (args[3] === "--add-label") {
+        if (opts?.failOn === "add") throw new Error("add-label failed");
+        labels.add(args[4]!);
+      } else if (args[3] === "--remove-label") {
+        if (opts?.failOn === "remove") throw new Error("remove-label failed");
+        labels.delete(args[4]!);
+      }
+    };
+    return { runner, calls };
+  }
+
+  test("adds the processing label before removing the ready label, as two separate calls", () => {
+    const { runner, calls } = fakeLabelGh(new Set(["ready-for-agent"]));
+    claimIssueLabels(
+      {
+        issueNumber: 81,
+        processingLabel: "processing",
+        readyLabel: "ready-for-agent",
+        repoSlug: "o/r",
+      },
+      runner,
+    );
+    expect(calls).toEqual([
+      ["issue", "edit", "81", "--add-label", "processing"],
+      ["issue", "edit", "81", "--remove-label", "ready-for-agent"],
+    ]);
+  });
+
+  test("a failed remove-label call leaves both labels — the issue stays reachable by the reclaim sweep", () => {
+    const labels = new Set(["ready-for-agent"]);
+    const { runner } = fakeLabelGh(labels, { failOn: "remove" });
+    expect(() =>
+      claimIssueLabels(
+        {
+          issueNumber: 81,
+          processingLabel: "processing",
+          readyLabel: "ready-for-agent",
+          repoSlug: "o/r",
+        },
+        runner,
+      ),
+    ).toThrow("remove-label failed");
+    // Neither label was lost: `processing` was added before the failure, and
+    // `ready-for-agent` is still present because the remove never landed — so
+    // the issue is still selectable on the next cycle, not stranded.
+    expect(labels).toEqual(new Set(["ready-for-agent", "processing"]));
+  });
+
+  test("a failed add-label call leaves the issue exactly as before — still selectable, never claimed", () => {
+    const labels = new Set(["ready-for-agent"]);
+    const { runner } = fakeLabelGh(labels, { failOn: "add" });
+    expect(() =>
+      claimIssueLabels(
+        {
+          issueNumber: 81,
+          processingLabel: "processing",
+          readyLabel: "ready-for-agent",
+          repoSlug: "o/r",
+        },
+        runner,
+      ),
+    ).toThrow("add-label failed");
+    expect(labels).toEqual(new Set(["ready-for-agent"]));
   });
 });
 

@@ -93,6 +93,35 @@ export function buildReclaimComment(reason: ReclaimReason): string {
 
 export type ReclaimReason = "no-lease" | "own-restart" | "expired";
 
+/** Same shape as `main.ts`'s `gh` wrapper — injected so tests assert argv. */
+export type GhRunner = (args: string[], opts?: { input?: string }, repo?: string) => void;
+
+/**
+ * Flip the claim labels as two explicit calls, add before remove (#81), never
+ * one combined `gh issue edit --add-label --remove-label`. `gh` performs the
+ * add and the remove as separate API calls regardless, so a combined edit
+ * that fails partway can strand an issue with neither label — invisible to
+ * both `selectIssue` (which needs `readyLabel`) and the reclaim sweep (which
+ * needs `processingLabel`). Ordering add-before-remove means a failure
+ * between the two calls instead leaves *both* labels, a state the reclaim
+ * sweep already knows how to find and resolve.
+ */
+export function claimIssueLabels(
+  opts: { issueNumber: number; processingLabel: string; readyLabel: string; repoSlug: string },
+  gh: GhRunner,
+): void {
+  gh(
+    ["issue", "edit", String(opts.issueNumber), "--add-label", opts.processingLabel],
+    undefined,
+    opts.repoSlug,
+  );
+  gh(
+    ["issue", "edit", String(opts.issueNumber), "--remove-label", opts.readyLabel],
+    undefined,
+    opts.repoSlug,
+  );
+}
+
 /**
  * Decide whether a `phoebe-processing` issue's lease should be reclaimed.
  *
