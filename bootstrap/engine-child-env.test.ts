@@ -5,31 +5,7 @@
 // absent from tenant A's child env — never spread in, so fail-closed.
 
 import { describe, expect, test } from "vite-plus/test";
-import { buildEngineChildEnv, parseDotenv } from "./engine-child-env.ts";
-
-describe("parseDotenv", () => {
-  test("parses KEY=VALUE lines, ignoring blanks and comments", () => {
-    const parsed = parseDotenv(
-      ["# a comment", "", "GH_TOKEN=ghp_abc", "CURSOR_API_KEY=sk-123", "  # indented", ""].join(
-        "\n",
-      ),
-    );
-    expect(parsed).toEqual({ GH_TOKEN: "ghp_abc", CURSOR_API_KEY: "sk-123" });
-  });
-
-  test("strips surrounding quotes and an optional `export` prefix", () => {
-    const parsed = parseDotenv(['export GH_TOKEN="ghp_x"', "OPENAI_KEY='sk-y'"].join("\n"));
-    expect(parsed).toEqual({ GH_TOKEN: "ghp_x", OPENAI_KEY: "sk-y" });
-  });
-
-  test("keeps `=` inside values and trims key whitespace", () => {
-    expect(parseDotenv("FOO = a=b=c")).toEqual({ FOO: "a=b=c" });
-  });
-
-  test("ignores malformed lines with no `=`", () => {
-    expect(parseDotenv("not a pair\nGH_TOKEN=ok")).toEqual({ GH_TOKEN: "ok" });
-  });
-});
+import { buildEngineChildEnv } from "./engine-child-env.ts";
 
 describe("buildEngineChildEnv", () => {
   const base = {

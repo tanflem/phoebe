@@ -55,32 +55,6 @@ export const ENGINE_CHILD_DEPLOYMENT_KNOBS = [
 ] as const;
 
 /**
- * Parse a `.env` file's contents into a plain record. Minimal by design — the
- * supervisor only needs `KEY=VALUE` for a tenant's `GH_TOKEN` + provider key:
- * blank lines and `#` comments are skipped, an optional `export ` prefix and
- * surrounding single/double quotes are stripped, and `=` inside a value is
- * preserved. No interpolation, no multiline values.
- */
-export function parseDotenv(contents: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const raw of contents.split("\n")) {
-    const line = raw.trim();
-    if (line.length === 0 || line.startsWith("#")) continue;
-    const withoutExport = line.startsWith("export ") ? line.slice("export ".length) : line;
-    const eq = withoutExport.indexOf("=");
-    if (eq === -1) continue;
-    const key = withoutExport.slice(0, eq).trim();
-    if (key.length === 0) continue;
-    let value = withoutExport.slice(eq + 1).trim();
-    if (value.length >= 2 && (value[0] === '"' || value[0] === "'") && value.at(-1) === value[0]) {
-      value = value.slice(1, -1);
-    }
-    out[key] = value;
-  }
-  return out;
-}
-
-/**
  * Build a scrubbed, tenant-only env for one engine child. Deny-by-default: start
  * empty, copy the allowlisted base + deployment knobs from `base` (the
  * supervisor's `process.env`), overlay `extraEnv` — this launch's engine

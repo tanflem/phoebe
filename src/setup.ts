@@ -20,6 +20,7 @@ import { join, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { CONFIG_DEFAULTS, PROVIDER_NAMES, type ProviderName } from "./config-schema.ts";
+import { parseDotenv } from "./dotenv.ts";
 import {
   DEFAULT_TEMPLATE_PARAMS,
   formatInitReport,
@@ -117,33 +118,6 @@ export function parseGitRemote(raw: string): GitRemote | undefined {
   const proto = /^(?:ssh|https?):\/\/(?:[^@/]+@)?([^/\s]+)\/(.+)$/.exec(url);
   if (proto) return build(proto[1], proto[2]);
   return undefined;
-}
-
-/**
- * Minimal `.env` reader: `KEY=value` lines, `#` comments and blanks skipped,
- * surrounding single/double quotes stripped. Enough to pre-fill secret prompts
- * from an existing `.env`; not a full dotenv implementation.
- */
-export function parseDotenv(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.trim();
-    if (line === "" || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq === -1) continue;
-    const key = line.slice(0, eq).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
-    let value = line.slice(eq + 1).trim();
-    if (
-      value.length >= 2 &&
-      ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'")))
-    ) {
-      value = value.slice(1, -1);
-    }
-    out[key] = value;
-  }
-  return out;
 }
 
 /** Config fields the wizard can pre-fill from an existing `phoebe.config.ts`. */

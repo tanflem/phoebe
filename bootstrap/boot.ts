@@ -39,8 +39,9 @@ import { loadUserConfig, resolveConfigPath } from "../src/load-config.ts";
 import { createCrashGuard, type CrashGuard } from "./crash-loop.ts";
 import type { ResolvedEngineSource } from "./engine-source.ts";
 import { lsRemoteBranchSha, materializeGithubEngine } from "./github-engine.ts";
-import { buildEngineChildEnv, parseDotenv } from "./engine-child-env.ts";
+import { buildEngineChildEnv } from "./engine-child-env.ts";
 import { attachBroker } from "./broker-ipc.ts";
+import { parseDotenv } from "../src/dotenv.ts";
 import { createSlotBroker, resolveMaxConcurrent } from "./slot-broker.ts";
 import {
   discoverTenants,

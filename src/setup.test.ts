@@ -18,7 +18,6 @@ import {
   createReadlinePrompter,
   extractConfigValues,
   maskSecret,
-  parseDotenv,
   parseGitRemote,
   parseSetupArgs,
   type Prompter,
@@ -92,25 +91,6 @@ describe("parseGitRemote", () => {
     expect(parseGitRemote("")).toBeUndefined();
     expect(parseGitRemote("not a url")).toBeUndefined();
     expect(parseGitRemote("https://github.com/justowner")).toBeUndefined();
-  });
-});
-
-describe("parseDotenv", () => {
-  test("reads KEY=value, skips comments and blanks, strips quotes", () => {
-    const parsed = parseDotenv(
-      [
-        "# comment",
-        "",
-        "GH_TOKEN=abc123",
-        'ANTHROPIC_API_KEY="quoted"',
-        "MALFORMED",
-        "  SPACED = x ",
-      ].join("\n"),
-    );
-    expect(parsed["GH_TOKEN"]).toBe("abc123");
-    expect(parsed["ANTHROPIC_API_KEY"]).toBe("quoted");
-    expect(parsed["SPACED"]).toBe("x");
-    expect(parsed).not.toHaveProperty("MALFORMED");
   });
 });
 
