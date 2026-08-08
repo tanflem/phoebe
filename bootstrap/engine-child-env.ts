@@ -1,25 +1,26 @@
-// The supervisor's per-tenant env scrub — isolation model A, §1 (#61).
+// The one child-env builder every engine spawn path routes through (#64).
 //
-// In a nested/multi-tenant deployment the supervisor (boot.ts) spawns one engine
-// child per tenant. Left as today's `stdio: "inherit"` with no `env`, every
-// child would inherit the supervisor's full `process.env` — which holds the
-// deployment engine-clone credential (#60) and, once several tenants' `.env`
-// files are loaded, every tenant's secrets. That is exactly the cross-tenant
-// exposure model A must prevent.
+// `phoebe boot` spawns an engine child two ways: flat (one child, the
+// supervisor's own process) and nested/workspace (one child per tenant, from
+// `superviseFleet`). Both need the same deployment-critical vars — the base
+// allowlist, the atomic launch snapshot, and engine provenance — and only ever
+// differ in *where the secrets come from*. Splitting the two spawn paths into
+// separate env-construction code is exactly how #38 happened: nested silently
+// lost the snapshot, provenance, and `PHOEBE_BASE_CONFIG` because nothing
+// forced the two builders to stay in sync. `childEnv` is the one function both
+// paths call so that cannot happen again.
 //
-// So the supervisor builds each child's env here, **deny-by-default from an
-// explicit allowlist**: a hardcoded base (PATH/HOME/git identity), the
-// deployment-global `PHOEBE_*` knobs the engine reads, plus *only* tenant T's
-// freshly-parsed `.env`. The supervisor's own `process.env` is never spread in,
-// so the #60 clone credential — and any future secret dropped there — is
-// fail-closed invisible to children (simply never on the list). Isolation is
-// structural, not disciplinary: a child can only ever hold its own tenant's
-// secrets. `buildAgentEnv` (src/agent-env.ts) then narrows correctly at the
-// agent hop, unchanged, because the child's env already holds only tenant T's.
-//
-// Flat single-tenant mode does NOT use this: one tenant is one trust domain
-// (the whole container), Docker injects exactly that tenant's secrets, and the
-// child inherits the supervisor env as it does today.
+// Isolation is still structural, not disciplinary: a child can only ever hold
+// what its own `secrets` source handed over, never the caller's ambient env.
+// For nested/workspace, that source is tenant T's freshly-parsed `.env` — the
+// supervisor's own `process.env` (and the #60 deployment clone credential in
+// it) is never on the base allowlist, so it is fail-closed invisible to fleet
+// children. For flat, the source is the supervisor's own `process.env`
+// itself: one tenant is one trust domain (the whole container), and Docker
+// already injects exactly that tenant's secrets into it — so passing it
+// through in full changes nothing. `buildAgentEnv` (src/agent-env.ts) then
+// narrows correctly at the agent hop, unchanged, because the child's env
+// already holds only its tenant's secrets.
 
 /**
  * Hardcoded base allowlist: process essentials plus the deployment-global git
@@ -55,21 +56,26 @@ export const ENGINE_CHILD_DEPLOYMENT_KNOBS = [
 ] as const;
 
 /**
- * Build a scrubbed, tenant-only env for one engine child. Deny-by-default: start
- * empty, copy the allowlisted base + deployment knobs from `base` (the
- * supervisor's `process.env`), overlay `extraEnv` — this launch's engine
- * provenance and resolved-config snapshot (boot.ts's `engineProvenanceEnv`),
- * the same per-launch values the flat spawn path passes — then overlay tenant
- * T's parsed `.env` last. Because `base`'s `GH_TOKEN` is not on either
- * allowlist, the only `GH_TOKEN` a child can hold is its own tenant's — the
- * deployment clone credential never leaks.
+ * Build one engine child's env: the allowlisted base + deployment knobs from
+ * `base` (the deployment's `process.env`), overlaid with `extraEnv` — this
+ * launch's engine provenance and resolved-config snapshot (boot.ts's
+ * `engineProvenanceEnv`) — overlaid last with `secrets`, the caller's secret
+ * source (`boot.ts`'s doc comment above explains why that source differs by
+ * spawn path).
+ *
+ * `secrets` is copied through as-is (no empty-string filtering): for the flat
+ * path it *is* `process.env`, which may legitimately hold an empty-string
+ * value, and the copy must be lossless for the child's env to be
+ * byte-identical to today's plain inherit. `base`/`extraEnv` keep the
+ * empty-string filter — those are allowlisted knobs, where an explicitly
+ * empty value means "unset", not "set to empty".
  */
-export function buildEngineChildEnv(opts: {
+export function childEnv(opts: {
   base: Record<string, string | undefined>;
-  tenantEnv: Record<string, string>;
+  secrets: Record<string, string | undefined>;
   extraEnv?: Record<string, string>;
 }): Record<string, string> {
-  const { base, tenantEnv, extraEnv } = opts;
+  const { base, secrets, extraEnv } = opts;
   const env: Record<string, string> = {};
   for (const key of [...ENGINE_CHILD_BASE_KEYS, ...ENGINE_CHILD_DEPLOYMENT_KNOBS]) {
     const value = base[key];
@@ -82,9 +88,10 @@ export function buildEngineChildEnv(opts: {
       if (value !== "") env[key] = value;
     }
   }
-  // Tenant secrets last: they are the tenant's own, and win over any collision.
-  for (const [key, value] of Object.entries(tenantEnv)) {
-    if (value !== "") env[key] = value;
+  // Secrets last: they are the caller's own trust domain, and win over any
+  // collision with the base allowlist or the launch provenance.
+  for (const [key, value] of Object.entries(secrets)) {
+    if (value !== undefined) env[key] = value;
   }
   return env;
 }

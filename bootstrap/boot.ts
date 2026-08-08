@@ -39,7 +39,7 @@ import { loadUserConfig, resolveConfigPath } from "../src/load-config.ts";
 import { createCrashGuard, type CrashGuard } from "./crash-loop.ts";
 import type { ResolvedEngineSource } from "./engine-source.ts";
 import { lsRemoteBranchSha, materializeGithubEngine } from "./github-engine.ts";
-import { buildEngineChildEnv } from "./engine-child-env.ts";
+import { childEnv } from "./engine-child-env.ts";
 import { attachBroker } from "./broker-ipc.ts";
 import { parseDotenv } from "../src/dotenv.ts";
 import { createSlotBroker, resolveMaxConcurrent } from "./slot-broker.ts";
@@ -408,6 +408,14 @@ export function engineProvenanceEnv(engine: {
   };
 }
 
+/**
+ * Spawn the flat single-tenant engine child. Its env routes through the same
+ * `childEnv` builder the nested/workspace fleet path uses (#64): the base
+ * allowlist and deployment knobs are already a subset of `process.env`, so
+ * passing `process.env` itself as `secrets` — flat's trust-domain-is-the-
+ * whole-container secret source — reproduces today's plain inherit exactly,
+ * plus this launch's provenance and resolved-config snapshot.
+ */
 function spawnSupervised(
   entry: string,
   argv: readonly string[],
@@ -417,8 +425,9 @@ function spawnSupervised(
   const exited = new Promise<EngineExit>((resolve) => {
     settle = resolve;
   });
+  const env = childEnv({ base: process.env, secrets: process.env, extraEnv: provenanceEnv });
   const child = spawnEngine(entry, argv, {
-    env: provenanceEnv,
+    env,
     onExit: (code: number | null, signal: NodeJS.Signals | null) => settle({ code, signal }),
     onSpawnError: (error: Error) => {
       console.error(`[phoebe] boot: engine failed to spawn — ${error.message}`);
@@ -482,9 +491,9 @@ function runFleet(opts: {
   const broker = createSlotBroker(resolveMaxConcurrent(process.env));
 
   const spawnFleetChild = (tenant: DiscoveredTenant, engine: LaunchedEngine): FleetChild => {
-    const env = buildEngineChildEnv({
+    const env = childEnv({
       base: process.env,
-      tenantEnv: readTenantEnv(tenant.envPath),
+      secrets: readTenantEnv(tenant.envPath),
       extraEnv: engineProvenanceEnv(engine),
     });
     let settle!: (exit: EngineExit) => void;

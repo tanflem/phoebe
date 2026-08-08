@@ -19,7 +19,7 @@ import {
   setupGitCredentials,
 } from "./boot.ts";
 import { BOOTSTRAP_RESOLVED_CONFIG_ENV } from "../src/config-resolution.ts";
-import { buildEngineChildEnv } from "./engine-child-env.ts";
+import { childEnv } from "./engine-child-env.ts";
 import { deploymentConfigFingerprint } from "./reconcile.ts";
 import { derivePaths } from "../src/paths.ts";
 
@@ -179,35 +179,93 @@ describe("engineProvenanceEnv", () => {
   });
 });
 
-// A nested-fleet child (spawnFleetChild) must receive the same
-// deployment-critical vars as a flat-spawned child (spawnSupervised) for the
-// same launch: engine provenance, the atomic resolved-config snapshot, and the
-// generated base config (#38). Both spawn paths build their env from
-// `engineProvenanceEnv`, so this pins that they cannot drift apart again.
-describe("flat vs nested child-env parity (#38)", () => {
-  test("a nested tenant's child env carries the same provenance + snapshot as the flat path's", () => {
-    const engine = {
-      source: { source: "github", repo: "JesusFilm/phoebe", ref: "main" } as const,
-      sha: "abc123",
-      quarantinedSha: null,
-      resolvedConfiguration: '{"schemaVersion":1,"config":{}}',
-    };
+// Flat (spawnSupervised) and nested/workspace (spawnFleetChild) both build
+// their child's env through the one `childEnv` builder (#64), differing only
+// in `secrets`: flat passes its own `process.env`, nested/workspace pass the
+// tenant's parsed `.env`. This pins that both still land the same
+// deployment-critical vars — provenance, the atomic resolved-config snapshot,
+// and the generated base config — for the same launch, and that the flat
+// path's resulting env is unchanged from before this builder existed.
+describe("flat vs nested child-env parity (#64, closes #38)", () => {
+  const engine = {
+    source: { source: "github", repo: "JesusFilm/phoebe", ref: "main" } as const,
+    sha: "abc123",
+    quarantinedSha: null,
+    resolvedConfiguration: '{"schemaVersion":1,"config":{}}',
+  };
+  const deploymentEnv = {
+    PATH: "/usr/bin",
+    HOME: "/home/phoebe",
+    GH_TOKEN: "DEPLOYMENT_CLONE_TOKEN",
+    PHOEBE_BASE_CONFIG: "/etc/phoebe/generated-base.json",
+  };
 
-    // Flat path: spawnSupervised's env is exactly `engineProvenanceEnv(engine)`.
-    const flatEnv = engineProvenanceEnv(engine);
-
-    // Nested path: spawnFleetChild's tenant-scrubbed env for the same launch.
-    const nestedEnv = buildEngineChildEnv({
-      base: { PATH: "/usr/bin", PHOEBE_BASE_CONFIG: "/etc/phoebe/generated-base.json" },
-      tenantEnv: { GH_TOKEN: "TENANT_TOKEN" },
+  test("a nested tenant's child env carries the same provenance + snapshot + base config as the flat path's", () => {
+    // Flat path: spawnSupervised's env — base allowlist ∪ knobs ∪ provenance ∪
+    // snapshot, with the deployment's own process.env as the secret source.
+    const flatEnv = childEnv({
+      base: deploymentEnv,
+      secrets: deploymentEnv,
       extraEnv: engineProvenanceEnv(engine),
     });
 
-    for (const [key, value] of Object.entries(flatEnv)) {
-      expect(nestedEnv[key]).toBe(value);
+    // Nested path: spawnFleetChild's tenant-scrubbed env for the same launch.
+    const nestedEnv = childEnv({
+      base: deploymentEnv,
+      secrets: { GH_TOKEN: "TENANT_TOKEN" },
+      extraEnv: engineProvenanceEnv(engine),
+    });
+
+    for (const key of [
+      BOOTSTRAP_RESOLVED_CONFIG_ENV,
+      "PHOEBE_RUNNING_ENGINE_SOURCE",
+      "PHOEBE_RUNNING_ENGINE_REPO",
+      "PHOEBE_RUNNING_ENGINE_REF",
+      "PHOEBE_RUNNING_ENGINE_SHA",
+      "PHOEBE_BOOTSTRAP_VERSION",
+      "PHOEBE_BASE_CONFIG",
+    ]) {
+      expect(nestedEnv[key]).toBe(flatEnv[key]);
     }
-    // The generated base config also reaches a nested child.
-    expect(nestedEnv.PHOEBE_BASE_CONFIG).toBe("/etc/phoebe/generated-base.json");
+    // Never the deployment clone credential — only the tenant's own.
+    expect(nestedEnv.GH_TOKEN).toBe("TENANT_TOKEN");
+  });
+
+  test("a nested launch quarantined by the crash-loop guard still parities PHOEBE_QUARANTINED_ENGINE_SHA", () => {
+    const quarantinedEngine = { ...engine, quarantinedSha: "bad-sha" };
+    const flatEnv = childEnv({
+      base: deploymentEnv,
+      secrets: deploymentEnv,
+      extraEnv: engineProvenanceEnv(quarantinedEngine),
+    });
+    const nestedEnv = childEnv({
+      base: deploymentEnv,
+      secrets: { GH_TOKEN: "TENANT_TOKEN" },
+      extraEnv: engineProvenanceEnv(quarantinedEngine),
+    });
+    expect(nestedEnv.PHOEBE_QUARANTINED_ENGINE_SHA).toBe("bad-sha");
+    expect(nestedEnv.PHOEBE_QUARANTINED_ENGINE_SHA).toBe(flatEnv.PHOEBE_QUARANTINED_ENGINE_SHA);
+  });
+
+  test("the flat child's env is byte-identical to a plain process.env + provenance merge (#64)", () => {
+    // Before #64, spawnSupervised passed `engineProvenanceEnv(engine)` straight
+    // to spawnEngine, which merges it onto process.env internally
+    // (`{ ...process.env, ...env }` in spawn-engine.mjs). childEnv's flat usage
+    // (secrets: process.env) must reproduce exactly that, including unlisted
+    // vars neither allowlist names.
+    const realisticProcessEnv = {
+      ...deploymentEnv,
+      npm_config_yes: "true",
+      RANDOM_UNLISTED_VAR: "still-here",
+    };
+    const provenanceEnv = engineProvenanceEnv(engine);
+    const before = { ...realisticProcessEnv, ...provenanceEnv };
+    const after = childEnv({
+      base: realisticProcessEnv,
+      secrets: realisticProcessEnv,
+      extraEnv: provenanceEnv,
+    });
+    expect(after).toEqual(before);
   });
 });
 
