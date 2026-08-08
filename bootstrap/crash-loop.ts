@@ -27,6 +27,27 @@
 //
 // This is the only crash-loop policy there is: the engine's own self-update and
 // the shell supervisor that mirrored a copy of these decisions are gone (#44).
+//
+// **Breadth × count (#78).** In a fleet, `CRASH_LOOP_THRESHOLD` fast crashes of
+// one SHA is not enough on its own to condemn it: one broken *tenant*
+// crash-looping must not cost the other nine their engine. A SHA is condemned
+// only when the count reaches the threshold *and* every tenant with a live
+// child (the injected `roster` dep) has fast-crashed on it — breadth rules out
+// "one tenant is broken", count keeps the one-off protection (a flaky network,
+// a busy host). The record gains `crashedTenants`, the set of tenant ids that
+// have fast-crashed on `failingSha`; `condemns` is the pure breadth × count
+// query. Flat is a fleet of one (#65), so its roster is always the same single
+// tenant and this reduces *exactly* to the old count-only rule. A tenant
+// discovered mid-crash-loop joins the roster before it has had a chance to
+// crash, so condemnation is delayed by one generation, not prevented — it will
+// crash too, and then join `crashedTenants`.
+//
+// The persisted shape changed to add `crashedTenants`. It is not versioned: a
+// file from before this change fails `isCrashLoopState` and degrades to
+// `INITIAL_CRASH_LOOP_STATE` like any other unrecognised shape, the same as a
+// half-written or hand-edited one. The cost is losing one fallback target
+// across the upgrade, which is the module's existing, deliberate failure mode
+// for any format it does not recognise — not a reason to version the file.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -55,8 +76,14 @@ type CrashLoopState = {
   lastGoodSha: string | null;
   /** SHA currently accumulating fast-crash counts (or quarantined as bad). */
   failingSha: string | null;
-  /** Consecutive fast crashes recorded for `failingSha`. */
+  /** Consecutive fast crashes recorded for `failingSha`, across every tenant. */
   failureCount: number;
+  /**
+   * Tenant ids that have fast-crashed on `failingSha` this generation — the
+   * breadth half of "breadth × count" (#78). Reset whenever `failingSha`
+   * changes or its quarantine lifts.
+   */
+  crashedTenants: readonly string[];
 };
 
 /** Nothing known yet: no proven commit, no quarantine. */
@@ -64,6 +91,7 @@ const INITIAL_CRASH_LOOP_STATE: CrashLoopState = {
   lastGoodSha: null,
   failingSha: null,
   failureCount: 0,
+  crashedTenants: [],
 };
 
 /** A finished engine run, as the fallback policy sees it. */
@@ -127,17 +155,44 @@ function judgeRun(run: RunOutcome, healthyMs: number): RunVerdict {
 }
 
 /**
+ * The breadth × count verdict (#78): is `sha` condemned? Count alone (the old
+ * rule) lets one broken tenant condemn a SHA for the whole fleet inside a
+ * single generation; breadth — every tenant in `roster` (tenants with a live
+ * child, held ones excluded by the caller) has fast-crashed on it too — is what
+ * tells "the engine is broken" apart from "one tenant is broken". An empty
+ * roster never condemns: with no live tenant to have crashed, there is no
+ * breadth evidence, only a possibly-stale count. Flat's roster is always its
+ * one constant tenant, so this collapses to the old count-only rule exactly.
+ */
+function isCondemned(
+  state: CrashLoopState,
+  sha: string,
+  threshold: number,
+  roster: readonly string[],
+): boolean {
+  return (
+    state.failingSha === sha &&
+    state.failureCount >= threshold &&
+    roster.length > 0 &&
+    roster.every((id) => state.crashedTenants.includes(id))
+  );
+}
+
+/**
  * Fold a finished run into the record. A healthy run becomes the new last-good,
  * but a quarantine on a *different* SHA is preserved — the healthy run is
  * usually the fallback itself, and clearing the record there would send the next
  * launch straight back into the commit it is avoiding. A fast crash counts
  * against its own SHA, starting over whenever the failing SHA moves — except
- * against an *active* quarantine, which outlives it.
+ * against an *active* condemnation, which outlives it. `tenantId` is the
+ * reporting tenant; `null` for a caller (`noteAlive`) whose run is always
+ * healthy, so breadth bookkeeping never applies to it.
  */
 function recordRun(
   state: CrashLoopState,
   run: RunOutcome,
-  opts: { healthyMs: number; threshold: number },
+  tenantId: string | null,
+  opts: { healthyMs: number; threshold: number; roster: readonly string[] },
 ): CrashLoopState {
   switch (judgeRun(run, opts.healthyMs)) {
     case "inconclusive":
@@ -148,15 +203,35 @@ function recordRun(
         lastGoodSha: run.sha,
         failingSha: stillQuarantining ? state.failingSha : null,
         failureCount: stillQuarantining ? state.failureCount : 0,
+        crashedTenants: stillQuarantining ? state.crashedTenants : [],
       };
     }
     case "crash": {
-      if (state.failingSha === run.sha) return { ...state, failureCount: state.failureCount + 1 };
+      if (state.failingSha === run.sha) {
+        return {
+          ...state,
+          failureCount: state.failureCount + 1,
+          crashedTenants:
+            tenantId !== null && !state.crashedTenants.includes(tenantId)
+              ? [...state.crashedTenants, tenantId]
+              : state.crashedTenants,
+        };
+      }
       // The fallback crashing too does not exonerate the commit it is standing
-      // in for: the quarantine has to hold until the tracked ref moves past the
-      // bad SHA, so a crash of some other commit must not overwrite it.
-      if (state.failingSha !== null && state.failureCount >= opts.threshold) return state;
-      return { lastGoodSha: state.lastGoodSha, failingSha: run.sha, failureCount: 1 };
+      // in for: the condemnation has to hold until the tracked ref moves past
+      // the bad SHA, so a crash of some other commit must not overwrite it.
+      if (
+        state.failingSha !== null &&
+        isCondemned(state, state.failingSha, opts.threshold, opts.roster)
+      ) {
+        return state;
+      }
+      return {
+        lastGoodSha: state.lastGoodSha,
+        failingSha: run.sha,
+        failureCount: 1,
+        crashedTenants: tenantId !== null ? [tenantId] : [],
+      };
     }
   }
 }
@@ -174,13 +249,18 @@ function hasFallbackTarget(state: CrashLoopState, crashedSha: string): boolean {
 
 /**
  * The commit to run *instead of* `targetSha` (the tracked ref's current tip), or
- * null to run the target as normal. Non-null only once the target has
- * fast-crashed `threshold` times and a different known-good commit exists — so
- * the fallback lapses by itself the moment the branch advances past the bad SHA,
- * which is exactly "fallback persists until the ref moves on".
+ * null to run the target as normal. Non-null only once the target is condemned
+ * (breadth × count, `isCondemned`) and a different known-good commit exists —
+ * so the fallback lapses by itself the moment the branch advances past the bad
+ * SHA, which is exactly "fallback persists until the ref moves on".
  */
-function fallbackSha(targetSha: string, state: CrashLoopState, threshold: number): string | null {
-  if (state.failingSha !== targetSha || state.failureCount < threshold) return null;
+function fallbackSha(
+  targetSha: string,
+  state: CrashLoopState,
+  threshold: number,
+  roster: readonly string[],
+): string | null {
+  if (!isCondemned(state, targetSha, threshold, roster)) return null;
   return hasFallbackTarget(state, targetSha) ? state.lastGoodSha : null;
 }
 
@@ -200,7 +280,9 @@ function isCrashLoopState(value: unknown): value is CrashLoopState {
   return (
     (state["lastGoodSha"] === null || typeof state["lastGoodSha"] === "string") &&
     (state["failingSha"] === null || typeof state["failingSha"] === "string") &&
-    typeof state["failureCount"] === "number"
+    typeof state["failureCount"] === "number" &&
+    Array.isArray(state["crashedTenants"]) &&
+    state["crashedTenants"].every((id) => typeof id === "string")
   );
 }
 
@@ -218,6 +300,7 @@ function readCrashLoopState(path: string): CrashLoopState {
       lastGoodSha: parsed.lastGoodSha,
       failingSha: parsed.failingSha,
       failureCount: parsed.failureCount,
+      crashedTenants: parsed.crashedTenants,
     };
   } catch {
     return INITIAL_CRASH_LOOP_STATE;
@@ -334,15 +417,19 @@ export type CrashGuard = {
    * not only guarded launches: what a pinned launch proved is still worth
    * remembering, so an operator who later moves that deployment onto a branch
    * already has a target to fall back to. A run with no commit to judge (a
-   * local mount) is dropped.
+   * local mount) is dropped. `tenantId` is the reporting tenant — the only
+   * thing about it the guard is allowed to learn (#78).
    */
-  record: (run: EngineRun) => void;
+  record: (run: EngineRun, tenantId: string) => void;
   /**
    * A commit is still running, and has been for `elapsedMs`. Once that passes
    * the healthy window the commit has proved itself, so it is banked as the
    * fallback target *while it runs* — an engine that has been up for a month and
    * is then killed by a host reboot would otherwise have left no record at all,
    * and the bad commit waiting on the branch would have nothing to fall back to.
+   * Idempotent across every tenant on one SHA: the first tenant to outlive the
+   * window exonerates the commit for all of them, and every later call is a
+   * no-op (`lastGoodSha === sha` already).
    */
   noteAlive: (sha: string, elapsedMs: number) => void;
   /**
@@ -354,6 +441,15 @@ export type CrashGuard = {
    * first: folding a crash in never changes which commit is last-good.
    */
   shouldRetry: (run: EngineRun) => boolean;
+  /**
+   * Is `sha` condemned right now — breadth (every tenant in the current
+   * `roster`) × count (`failureCount` at `threshold`)? A pure query, unlike
+   * `fallbackFor`: no persistence, no emitted event, no side effect on a lapsed
+   * quarantine. `fallbackFor` uses it internally to decide the pin; a fleet
+   * feeding it a live roster (not yet wired — a follow-up to #78) is its other
+   * consumer.
+   */
+  condemns: (sha: string) => boolean;
 };
 
 export function createCrashGuard(deps: {
@@ -361,6 +457,14 @@ export function createCrashGuard(deps: {
   engineDir: string;
   /** Where the guard's decisions go, already worded for an operator. */
   log: (line: string) => void;
+  /**
+   * The tenants with a live child right now, excluding any `hold`ed one (#86):
+   * a held tenant is present but not running, and counting it would block
+   * condemnation forever. Read fresh on every `condemns`/`fallbackFor` call, so
+   * a tenant coming, going, or being held is reflected the next call — never
+   * cached across the guard's lifetime.
+   */
+  roster: () => readonly string[];
   /** Defaults to a JSON file at `crashLoopStatePath(engineDir)`. */
   store?: CrashLoopStore;
   threshold?: number;
@@ -368,7 +472,6 @@ export function createCrashGuard(deps: {
 }): CrashGuard {
   const threshold = deps.threshold ?? CRASH_LOOP_THRESHOLD;
   const healthyMs = deps.healthyMs ?? HEALTHY_RUN_MS;
-  const options = { threshold, healthyMs };
   const path = crashLoopStatePath(deps.engineDir);
   const store = deps.store ?? defaultCrashLoopStore(path);
   const emit = (event: CrashGuardEvent) => deps.log(describeEvent(event));
@@ -387,7 +490,8 @@ export function createCrashGuard(deps: {
 
   return {
     fallbackFor(targetSha) {
-      const pin = fallbackSha(targetSha, state, threshold);
+      const roster = deps.roster();
+      const pin = fallbackSha(targetSha, state, threshold, roster);
       if (pin !== null) {
         emit({
           kind: "fallback",
@@ -402,20 +506,26 @@ export function createCrashGuard(deps: {
         // is history. Dropping it here (rather than leaving it for the next
         // crash to overwrite) is what makes the fallback lapse exactly once.
         const quarantinedSha = state.failingSha;
-        const wasQuarantined = state.failureCount >= threshold;
-        persist({ lastGoodSha: state.lastGoodSha, failingSha: null, failureCount: 0 });
-        if (wasQuarantined) emit({ kind: "recovered", quarantinedSha, sha: targetSha });
+        const wasCondemned = isCondemned(state, quarantinedSha, threshold, roster);
+        persist({
+          lastGoodSha: state.lastGoodSha,
+          failingSha: null,
+          failureCount: 0,
+          crashedTenants: [],
+        });
+        if (wasCondemned) emit({ kind: "recovered", quarantinedSha, sha: targetSha });
       }
       return null;
     },
 
-    record(run) {
+    record(run, tenantId) {
       const outcome = toRunOutcome(run);
       if (outcome === null) return;
 
       const before = state;
       const verdict = judgeRun(outcome, healthyMs);
-      persist(recordRun(before, outcome, options));
+      const roster = deps.roster();
+      persist(recordRun(before, outcome, tenantId, { threshold, healthyMs, roster }));
 
       if (verdict === "inconclusive") return;
       if (verdict === "healthy") {
@@ -425,10 +535,10 @@ export function createCrashGuard(deps: {
       if (
         before.failingSha !== null &&
         before.failingSha !== outcome.sha &&
-        before.failureCount >= threshold
+        isCondemned(before, before.failingSha, threshold, roster)
       ) {
-        // A crash the quarantine swallowed — this is the fallback itself dying,
-        // which reads very differently in a log to the tracked ref dying.
+        // A crash the condemnation swallowed — this is the fallback itself
+        // dying, which reads very differently in a log to the tracked ref dying.
         emit({
           kind: "fallback-crashed",
           sha: outcome.sha,
@@ -450,7 +560,13 @@ export function createCrashGuard(deps: {
 
     noteAlive(sha, elapsedMs) {
       if (elapsedMs < healthyMs || state.lastGoodSha === sha) return;
-      persist(recordRun(state, { sha, exitCode: null, elapsedMs, requestedStop: false }, options));
+      persist(
+        recordRun(state, { sha, exitCode: null, elapsedMs, requestedStop: false }, null, {
+          threshold,
+          healthyMs,
+          roster: deps.roster(),
+        }),
+      );
       emit({ kind: "last-good", sha });
     },
 
@@ -459,6 +575,10 @@ export function createCrashGuard(deps: {
       const outcome = toRunOutcome(run);
       if (outcome === null) return false;
       return judgeRun(outcome, healthyMs) === "crash" && hasFallbackTarget(state, outcome.sha);
+    },
+
+    condemns(sha) {
+      return isCondemned(state, sha, threshold, deps.roster());
     },
   };
 }

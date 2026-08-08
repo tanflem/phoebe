@@ -425,12 +425,31 @@ and the next launch is an ordinary one. If the fallback crashes too the
 quarantine still holds and the container exits — boot has run out of better
 commits, and says so.
 
+**Breadth × count, in a fleet (#78).** A nested/workspace deployment runs one
+engine SHA as N tenants' children, so `CRASH_LOOP_THRESHOLD` fast crashes is not
+enough on its own to condemn a SHA — that would let a single broken tenant take
+the fallback away from nine healthy ones. A SHA is condemned only when **both**
+hold: the count reaches the threshold, and _every_ tenant with a live child has
+fast-crashed on it (a tenant that is `hold`ed rather than running is excluded
+from that set, so it can never block condemnation). Breadth is what tells "the
+engine commit is broken" apart from "one tenant is broken"; count is what still
+rules out a one-off (a flaky network, a busy host). A tenant that shows up mid
+crash-loop delays condemnation by one generation — it has not crashed yet, so
+breadth is not satisfied until it does — never prevents it. Flat is always a
+fleet of one tenant (#65), so this rule reduces _exactly_ to the old count-only
+one for it. The pure query for this verdict is `condemns(sha)`; feeding it a
+live fleet roster (today only `fallbackFor` runs in fleet mode, applying an
+already-condemned SHA's existing pin) is a follow-up.
+
 The record lives at `/data/engine/engine-crash-loop.json` (last-good SHA,
-quarantined SHA, crash count) — deployment-global, beside the shared engine
-checkout, since it is about the engine, not any tenant. A quarantine survives the
-container restart a crash-looping engine causes. An unwritable dir is a warning,
-not a failure:
-the guard still works for the life of that container.
+quarantined SHA, crash count, and the set of tenants that fast-crashed on it) —
+deployment-global, beside the shared engine checkout, since it is about the
+engine, not any tenant. A quarantine survives the container restart a
+crash-looping engine causes. An unwritable dir is a warning, not a failure: the
+guard still works for the life of that container. The shape is not versioned:
+a record from before `crashedTenants` existed just fails to parse as the current
+shape and degrades to "nothing known" — the same fallback-target-only cost as
+any other unreadable file.
 
 The guard is **inert** unless `engine.ref` is a moving branch — a `local` source
 has no commit to pin, and a pinned SHA or tag means the operator chose that exact

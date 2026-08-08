@@ -162,16 +162,31 @@ and disarm the fallback for good. A commit that outlives the window is banked as
 last-good **while it is still running**, so an engine up for weeks that is then
 killed outright still leaves a fallback target behind.
 
-The record — last-good SHA, quarantined SHA, crash count — is JSON at
-`/data/engine/engine-crash-loop.json`: deployment-global, beside the shared
-engine checkout, not under any tenant's `paths.stateDir` — the guard judges the
-engine, not any tenant. It survives the container restart a crash-looping engine
-causes. The guard is inert unless the engine ref is a
-**moving branch** (a local mount has no commit to pin; a pinned SHA or tag means
-the operator chose that exact commit, and quietly serving a different one would
-be worse than crash-looping visibly) and inert with nothing known-good yet — a
-first boot straight onto a broken ref exits and lets the container's restart
-policy make the failure visible. See
+**Breadth × count in a fleet (#78).** In nested/workspace mode, N tenants can
+run the same engine SHA as N children, so a bare crash _count_ is not enough to
+condemn it: one broken tenant crash-looping would otherwise cost the other nine
+their engine inside a single generation. A SHA is condemned only when the count
+reaches the threshold **and** every tenant with a live child (the guard's
+injected `roster`, held tenants excluded — #86) has fast-crashed on it. Breadth
+tells "the engine is broken" apart from "one tenant is broken"; count keeps the
+one-off protection (a flaky network, a busy host). A tenant discovered
+mid-crash-loop joins the roster before it has crashed, delaying condemnation by
+one generation rather than preventing it. Flat is a fleet of one (#65), so its
+roster is always that single tenant and the rule reduces _exactly_ to the old
+count-only one. `condemns(sha)` is the pure query for this verdict; wiring a
+fleet's live roster through it — and calling `record`/`noteAlive`/`shouldRetry`
+at all in fleet mode, which today only `fallbackFor` sees — is a follow-up.
+
+The record — last-good SHA, quarantined SHA, crash count, and the set of
+tenants that fast-crashed on it — is JSON at `/data/engine/engine-crash-loop.json`:
+deployment-global, beside the shared engine checkout, not under any tenant's
+`paths.stateDir` — the guard judges the engine, not any tenant. It survives the
+container restart a crash-looping engine causes. The guard is inert unless the
+engine ref is a **moving branch** (a local mount has no commit to pin; a pinned
+SHA or tag means the operator chose that exact commit, and quietly serving a
+different one would be worse than crash-looping visibly) and inert with nothing
+known-good yet — a first boot straight onto a broken ref exits and lets the
+container's restart policy make the failure visible. See
 [`configuration.md`](configuration.md#crash-loop-fallback).
 
 ## One cycle, end to end

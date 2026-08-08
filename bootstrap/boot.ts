@@ -449,11 +449,18 @@ function spawnSupervised(engine: LaunchedEngine, argv: readonly string[]): Super
  * guard about one engine SHA for the whole fleet; its home is a container
  * constant (the engine checkout base), not a per-tenant path, so it no longer
  * depends on loading any config and cannot drift with a mid-flight config edit.
+ *
+ * `roster` is the tenants with a live child, excluding held ones (#78) — flat
+ * passes its one constant tenant; a real fleet still passes none, since
+ * feeding it live tenant discovery (and calling `record`/`noteAlive`/
+ * `shouldRetry` at all, #60 §6) is a follow-up. An empty roster keeps
+ * `fallbackFor` from pinning on a fleet's behalf until that lands.
  */
-function createBootCrashGuard(): CrashGuard {
+function createBootCrashGuard(roster: () => readonly string[]): CrashGuard {
   return createCrashGuard({
     engineDir: engineBaseDir(),
     log: (line) => console.error(line),
+    roster,
   });
 }
 
@@ -481,9 +488,10 @@ function readTenantEnv(envPath: string): Record<string, string> {
  *
  * Each child is spawned with an IPC channel + the tenant's scrubbed env (#61)
  * and cwd (its config dir), and wired to the broker (#59). The crash-loop guard
- * still applies any existing engine fallback on each (re)launch; feeding the
- * guard fleet-aggregated crash verdicts (#60 §6) is a follow-up — nested live
- * validation is deferred to #77.
+ * still applies any existing engine fallback on each (re)launch; wiring a live
+ * tenant roster and calling `record`/`noteAlive`/`shouldRetry` here so a fleet
+ * actually accrues fleet-aggregated crash verdicts (#78's breadth × count rule)
+ * is a follow-up.
  *
  * `discover` is injected so nested mode can stay a pure filesystem scan while
  * workspace mode re-walks the tree and reloads each child's `repoSlug` (#91).
@@ -689,7 +697,6 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
 
   const configDir = process.cwd();
   const configPath = resolveConfigPath(undefined, configDir);
-  const guard = createBootCrashGuard();
   const intervalMs = reconcileIntervalMs();
   const drainTimeoutMs = reconcileDrainTimeoutMs();
 
@@ -724,6 +731,9 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
       `[phoebe] boot: workspace mode — supervising ${initial.tenants.length} tenant(s) ` +
         `on one shared engine (depth ${workspace.depth}).`,
     );
+    // A fleet's live roster is not wired yet (see runFleet's doc comment) —
+    // this guard only ever applies an existing pin via `fallbackFor`.
+    const guard = createBootCrashGuard(() => []);
     let fleetExit: EngineExit;
     try {
       fleetExit = await runFleet({
@@ -751,6 +761,9 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
       `[phoebe] boot: nested deployment — supervising ${discovery.tenants.length} tenant(s) ` +
         `on one shared engine.`,
     );
+    // A fleet's live roster is not wired yet (see runFleet's doc comment) —
+    // this guard only ever applies an existing pin via `fallbackFor`.
+    const guard = createBootCrashGuard(() => []);
     let fleetExit: EngineExit;
     try {
       fleetExit = await runFleet({
@@ -774,6 +787,9 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
   // engine axis (config/ref) is its only relaunch trigger, one edit is one
   // relaunch, not two.
   const flatTenant = discovery.tenants[0];
+  // Flat is a fleet of one (#65): the roster is always this one tenant, so the
+  // breadth × count rule (#78) reduces exactly to the old count-only one.
+  const guard = createBootCrashGuard(() => [flatTenant.id]);
 
   let exit: EngineExit;
   try {
@@ -791,7 +807,7 @@ export async function runBoot(argv: readonly string[]): Promise<void> {
         );
         return "respawn";
       },
-      onChildRun: (run) => guard.record(run),
+      onChildRun: (run) => guard.record(run, run.tenant.id),
       onChildTick: ({ engine, elapsedMs }) => {
         if (engine.sha !== null) guard.noteAlive(engine.sha, elapsedMs);
       },
