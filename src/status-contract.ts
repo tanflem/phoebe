@@ -205,7 +205,7 @@ function hasNullableNumber(record: Record<string, unknown>, key: string): boolea
   return record[key] === null || typeof record[key] === "number";
 }
 
-const WORK_KINDS = ["conflicts", "checks", "reviews", "issues", "research"] as const;
+export const WORK_KINDS = ["conflicts", "checks", "reviews", "issues", "research"] as const;
 const LIFECYCLE_STATES = [
   "starting",
   "selecting",

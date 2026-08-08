@@ -145,7 +145,7 @@ export type PathsConfig = {
   repoDir: string;
   /** Per-unit git worktrees. */
   worktreesDir: string;
-  /** Reserved per-tenant state (supervisor status.json, #73). */
+  /** Per-tenant state (status-v2.json, runtime-id, events-v1/). */
   stateDir: string;
 };
 

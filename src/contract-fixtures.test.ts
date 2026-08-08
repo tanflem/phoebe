@@ -4,8 +4,9 @@ import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { afterEach, describe, expect, test } from "vite-plus/test";
+import { WORK_KIND_NAMES } from "./config-schema.ts";
 import { eventJournalDir, replayEventJournal } from "./event-journal.ts";
-import { parseStatusSnapshot, parseWorkOutcomeEvent } from "./status-contract.ts";
+import { parseStatusSnapshot, parseWorkOutcomeEvent, WORK_KINDS } from "./status-contract.ts";
 
 const root = join(import.meta.dirname, "..");
 const fixtureRoot = join(root, "contracts", "fixtures");
@@ -111,5 +112,36 @@ describe("published compatibility fixtures", () => {
       $id: "https://phoebe.dev/contracts/events-v1.schema.json",
       additionalProperties: true,
     });
+  });
+
+  test("WorkKind stays in lockstep across the internal union, the config seam, and both wire schemas", () => {
+    const status = json("contracts/status-v2.schema.json") as {
+      properties: {
+        activeWork: { oneOf: [unknown, { properties: { kind: { enum: string[] } } }] };
+      };
+    };
+    const events = json("contracts/events-v1.schema.json") as {
+      properties: { work: { properties: { kind: { enum: string[] } } } };
+    };
+    const sets = {
+      "status-contract.ts's WorkKind": [...WORK_KINDS].sort(),
+      "config-schema.ts's WORK_KIND_NAMES": [...WORK_KIND_NAMES].sort(),
+      "status-v2.schema.json's activeWork.kind enum": [
+        ...status.properties.activeWork.oneOf[1].properties.kind.enum,
+      ].sort(),
+      "events-v1.schema.json's work.kind enum": [
+        ...events.properties.work.properties.kind.enum,
+      ].sort(),
+    };
+    const [firstLabel, firstSet] = Object.entries(sets)[0];
+    for (const [label, set] of Object.entries(sets)) {
+      expect(
+        set,
+        `${label} lists ${JSON.stringify(set)} but ${firstLabel} lists ${JSON.stringify(firstSet)}. ` +
+          "Adding a work kind requires a deliberate contract decision, not a rename: update " +
+          "status-contract.ts's WorkKind, config-schema.ts's WORK_KIND_NAMES, and both schemas' " +
+          "kind enums together.",
+      ).toEqual(firstSet);
+    }
   });
 });
